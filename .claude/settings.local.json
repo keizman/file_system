@@ -1,7 +1,19 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(rm:*)",
+      "WebFetch(domain:gist.github.com)",
+      "Bash(rm:*)",
+      "Bash(pkill:*)",
+      "Bash(lsof:*)",
+      "Bash(ss:*)",
+      "Bash(SERVER_PORT=9302 python main.py)",
+      "Bash(curl:*)",
+      "Bash(chmod:*)"
     ],
     "deny": []
   }

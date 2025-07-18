@@ -7,12 +7,12 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QTabWidget, QTableWidget, QTableWidgetItem, QLineEdit, 
                            QPushButton, QLabel, QStatusBar, QMessageBox, QProgressBar,
                            QMenu, QHeaderView, QComboBox, QGroupBox, QSplitter,
-                           QTextEdit, QFrame, QApplication)
+                           QTextEdit, QFrame, QApplication, QButtonGroup)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
 from PyQt5.QtGui import QIcon, QFont, QPixmap, QCursor
 import qtawesome as qta
-from ui.styles import (COMPLETE_STYLE, BUTTON_STYLE, SECONDARY_BUTTON_STYLE, 
-                      OUTLINE_BUTTON_STYLE, COLORS)
+from ui.styles import (get_complete_style, update_colors, get_theme_colors,
+                      update_style_constants, COLORS)
 from api_client import api_client
 from adb_manager import adb_manager
 from config import ClientConfig
@@ -90,22 +90,57 @@ class APKFinderMainWindow(QMainWindow):
         self.servers = []
         self.search_worker = None
         self.download_worker = None
+        self.server_buttons = []
+        self.selected_server = None
+        self.inspector_dialog = None
+        self.cached_devices = []  # Cache connected devices
+        self.recent_downloads = []  # Store recent downloads
         
         self.init_ui()
+        # Apply theme after creating UI components
+        self.apply_theme()
+        
         self.load_servers()
         self.load_initial_data()
+        self.refresh_devices()  # Load initial device list
+        self.update_recent_downloads_display()  # Initialize recent downloads display
+    
+    def center_window(self):
+        """Center the window on screen"""
+        from PyQt5.QtWidgets import QDesktopWidget
+        
+        # Get screen geometry
+        screen = QDesktopWidget().screenGeometry()
+        
+        # Get window geometry
+        window = self.geometry()
+        
+        # Calculate center position
+        x = (screen.width() - window.width()) // 2
+        y = (screen.height() - window.height()) // 2
+        
+        # Move window to center
+        self.move(x, y)
     
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle("APK Finder")
-        self.setGeometry(100, 100, ClientConfig.WINDOW_WIDTH, ClientConfig.WINDOW_HEIGHT)
-        self.setWindowIcon(qta.icon('mdi.android', color=COLORS["primary"]))
+        self.resize(ClientConfig.WINDOW_WIDTH, ClientConfig.WINDOW_HEIGHT)
         
-        # Apply styles
-        self.setStyleSheet(COMPLETE_STYLE)
+        # Center the window on screen
+        self.center_window()
+        
+        # Set window icon using the resource file
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "resources", "images.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        else:
+            # Fallback to font icon
+            self.setWindowIcon(qta.icon('mdi.android', color=COLORS["primary"]))
         
         # Central widget
         central_widget = QWidget()
+        central_widget.setObjectName("centralWidget")
         self.setCentralWidget(central_widget)
         
         # Main layout
@@ -159,14 +194,18 @@ class APKFinderMainWindow(QMainWindow):
         # Refresh button
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setIcon(qta.icon('mdi.refresh', color=COLORS["white"]))
-        self.refresh_btn.setStyleSheet(BUTTON_STYLE)
         self.refresh_btn.clicked.connect(self.refresh_scan)
         header_layout.addWidget(self.refresh_btn)
+        
+        # Inspector button
+        self.inspector_btn = QPushButton("Inspector")
+        self.inspector_btn.setIcon(qta.icon('mdi.bug', color=COLORS["white"]))
+        self.inspector_btn.clicked.connect(self.toggle_inspector)
+        header_layout.addWidget(self.inspector_btn)
         
         # Settings button
         self.settings_btn = QPushButton("Settings")
         self.settings_btn.setIcon(qta.icon('mdi.cog', color=COLORS["white"]))
-        self.settings_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
         self.settings_btn.clicked.connect(self.show_settings)
         header_layout.addWidget(self.settings_btn)
         
@@ -178,25 +217,69 @@ class APKFinderMainWindow(QMainWindow):
         
         # Server selection
         server_group = QGroupBox("Server")
+        server_group.setMaximumHeight(80)  # Limit height
         server_layout = QHBoxLayout(server_group)
         
-        self.server_combo = QComboBox()
-        self.server_combo.addItem("All Servers", "")
-        server_layout.addWidget(self.server_combo)
+        # Create button group for server selection
+        self.server_button_group = QButtonGroup()
+        self.server_button_group.setExclusive(True)
+        
+        # All Servers button (default)
+        self.all_servers_btn = QPushButton("All Servers")
+        self.all_servers_btn.setCheckable(True)
+        self.all_servers_btn.setChecked(True)
+        self.all_servers_btn.setObjectName("serverButton")
+        self.all_servers_btn.setProperty("serverData", "")
+        self.all_servers_btn.setMaximumHeight(35)  # Limit button height
+        self.server_button_group.addButton(self.all_servers_btn)
+        self.server_buttons.append(self.all_servers_btn)
+        server_layout.addWidget(self.all_servers_btn)
+        
+        # Connect button group signal
+        self.server_button_group.buttonClicked.connect(self.on_server_selected)
         
         controls_layout.addWidget(server_group)
         
-        # Build type tabs
+        # Build type buttons
         build_group = QGroupBox("Build Type")
+        build_group.setMaximumHeight(80)  # Limit height
         build_layout = QHBoxLayout(build_group)
         
-        self.build_type_tabs = QTabWidget()
-        self.build_type_tabs.addTab(QWidget(), "Release")
-        self.build_type_tabs.addTab(QWidget(), "Debug")
-        self.build_type_tabs.addTab(QWidget(), "Combine")
-        self.build_type_tabs.currentChanged.connect(self.on_build_type_changed)
+        # Create button group for build type selection
+        self.build_type_button_group = QButtonGroup()
+        self.build_type_button_group.setExclusive(True)
         
-        build_layout.addWidget(self.build_type_tabs)
+        # Release button (default)
+        self.release_btn = QPushButton("Release")
+        self.release_btn.setCheckable(True)
+        self.release_btn.setChecked(True)
+        self.release_btn.setObjectName("buildTypeButton")
+        self.release_btn.setProperty("buildType", "release")
+        self.release_btn.setMaximumHeight(35)  # Limit button height
+        self.build_type_button_group.addButton(self.release_btn)
+        build_layout.addWidget(self.release_btn)
+        
+        # Debug button
+        self.debug_btn = QPushButton("Debug")
+        self.debug_btn.setCheckable(True)
+        self.debug_btn.setObjectName("buildTypeButton")
+        self.debug_btn.setProperty("buildType", "debug")
+        self.debug_btn.setMaximumHeight(35)  # Limit button height
+        self.build_type_button_group.addButton(self.debug_btn)
+        build_layout.addWidget(self.debug_btn)
+        
+        # Combine button
+        self.combine_btn = QPushButton("Combine")
+        self.combine_btn.setCheckable(True)
+        self.combine_btn.setObjectName("buildTypeButton")
+        self.combine_btn.setProperty("buildType", "combine")
+        self.combine_btn.setMaximumHeight(35)  # Limit button height
+        self.build_type_button_group.addButton(self.combine_btn)
+        build_layout.addWidget(self.combine_btn)
+        
+        # Connect button group signal
+        self.build_type_button_group.buttonClicked.connect(self.on_build_type_selected)
+        
         controls_layout.addWidget(build_group)
         
         controls_layout.addStretch()
@@ -216,7 +299,6 @@ class APKFinderMainWindow(QMainWindow):
         # Search button
         self.search_btn = QPushButton("Search")
         self.search_btn.setIcon(qta.icon('mdi.magnify', color=COLORS["white"]))
-        self.search_btn.setStyleSheet(BUTTON_STYLE)
         self.search_btn.clicked.connect(self.search_files)
         search_layout.addWidget(self.search_btn)
         
@@ -254,7 +336,15 @@ class APKFinderMainWindow(QMainWindow):
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         
+        # Configure vertical header (row numbers)
+        vertical_header = self.file_table.verticalHeader()
+        vertical_header.setVisible(True)
+        vertical_header.setDefaultSectionSize(30)
+        vertical_header.setMinimumSectionSize(30)
+        vertical_header.setSectionResizeMode(QHeaderView.Fixed)
+        
         self.file_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.file_table.setEditTriggers(QTableWidget.NoEditTriggers)  # Disable editing
         self.file_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_table.customContextMenuRequested.connect(self.show_context_menu)
         
@@ -279,34 +369,37 @@ class APKFinderMainWindow(QMainWindow):
         """)
         download_layout.addWidget(download_header)
         
-        # Download info
-        self.download_info = QTextEdit()
-        self.download_info.setMaximumHeight(150)
-        self.download_info.setReadOnly(True)
-        self.download_info.setPlaceholderText("Select a file to see download information...")
-        download_layout.addWidget(self.download_info)
+        # Recent Downloads section (main content)
+        self.recent_downloads_list = QTextEdit()
+        self.recent_downloads_list.setReadOnly(True)
+        self.recent_downloads_list.setPlaceholderText("No recent downloads...")
+        download_layout.addWidget(self.recent_downloads_list)
         
         # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         download_layout.addWidget(self.progress_bar)
         
-        # Download buttons
+        # Main action buttons
         button_layout = QHBoxLayout()
         
         self.download_btn = QPushButton("Download")
         self.download_btn.setIcon(qta.icon('mdi.download', color=COLORS["white"]))
-        self.download_btn.setStyleSheet(BUTTON_STYLE)
         self.download_btn.clicked.connect(self.download_selected_file)
         self.download_btn.setEnabled(False)
         button_layout.addWidget(self.download_btn)
         
         self.install_btn = QPushButton("Auto Install")
         self.install_btn.setIcon(qta.icon('mdi.cellphone-android', color=COLORS["white"]))
-        self.install_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
         self.install_btn.clicked.connect(self.auto_install_file)
         self.install_btn.setEnabled(False)
         button_layout.addWidget(self.install_btn)
+        
+        self.clear_recent_btn = QPushButton("Clear Recent")
+        self.clear_recent_btn.setIcon(qta.icon('mdi.delete', color=COLORS["error"]))
+        self.clear_recent_btn.setObjectName("outlineButton")
+        self.clear_recent_btn.clicked.connect(self.clear_recent_downloads)
+        button_layout.addWidget(self.clear_recent_btn)
         
         download_layout.addLayout(button_layout)
         
@@ -321,7 +414,7 @@ class APKFinderMainWindow(QMainWindow):
         
         self.refresh_devices_btn = QPushButton("Refresh Devices")
         self.refresh_devices_btn.setIcon(qta.icon('mdi.refresh', color=COLORS["primary"]))
-        self.refresh_devices_btn.setStyleSheet(OUTLINE_BUTTON_STYLE)
+        self.refresh_devices_btn.setObjectName("outlineButton")  # Set button style
         self.refresh_devices_btn.clicked.connect(self.refresh_devices)
         device_layout.addWidget(self.refresh_devices_btn)
         
@@ -348,7 +441,8 @@ class APKFinderMainWindow(QMainWindow):
         self.connection_timer = QTimer()
         self.connection_timer.timeout.connect(self.check_connection)
         self.connection_timer.start(30000)  # Check every 30 seconds
-        self.check_connection()
+        # Delay initial connection check to avoid blocking startup
+        QTimer.singleShot(2000, self.check_connection)
     
     def load_servers(self):
         """Load available servers"""
@@ -360,11 +454,28 @@ class APKFinderMainWindow(QMainWindow):
                 servers = loop.run_until_complete(api_client.get_servers())
                 
                 self.servers = servers
-                self.server_combo.clear()
-                self.server_combo.addItem("All Servers", "")
+                
+                # Remove existing server buttons (except "All Servers")
+                for button in self.server_buttons[1:]:  # Skip first button (All Servers)
+                    self.server_button_group.removeButton(button)
+                    button.deleteLater()
+                
+                self.server_buttons = [self.all_servers_btn]  # Keep only "All Servers"
+                
+                # Add new server buttons
+                server_group = self.all_servers_btn.parent()
+                server_layout = server_group.layout()
                 
                 for server in servers:
-                    self.server_combo.addItem(server["display_name"], server["name"])
+                    server_btn = QPushButton(server["display_name"])
+                    server_btn.setCheckable(True)
+                    server_btn.setObjectName("serverButton")
+                    server_btn.setProperty("serverData", server["name"])
+                    server_btn.setMaximumHeight(35)  # Limit button height
+                    
+                    self.server_button_group.addButton(server_btn)
+                    self.server_buttons.append(server_btn)
+                    server_layout.addWidget(server_btn)
                 
                 loop.close()
                 
@@ -382,12 +493,20 @@ class APKFinderMainWindow(QMainWindow):
         keyword = self.search_input.text().strip()
         self.search_files_internal(keyword)
     
+    def on_server_selected(self, button):
+        """Handle server button selection"""
+        server_data = button.property("serverData")
+        self.selected_server = server_data
+        
+        # Trigger search with new server selection
+        self.search_files_internal("", limit=ClientConfig.DEFAULT_RESULTS_PER_PAGE)
+    
     def search_files_internal(self, keyword: str, limit: int = None):
         """Internal search method"""
         if self.search_worker and self.search_worker.isRunning():
             return
         
-        server = self.server_combo.currentData() or None
+        server = self.selected_server
         build_type = self.get_current_build_type()
         limit = limit or ClientConfig.DEFAULT_RESULTS_PER_PAGE
         
@@ -400,17 +519,17 @@ class APKFinderMainWindow(QMainWindow):
         self.search_worker.start()
     
     def get_current_build_type(self) -> str:
-        """Get current build type from tabs"""
-        tab_index = self.build_type_tabs.currentIndex()
-        if tab_index == 0:
-            return "release"
-        elif tab_index == 1:
-            return "debug"
-        else:
-            return "combine"
+        """Get current build type from button group"""
+        checked_button = self.build_type_button_group.checkedButton()
+        if checked_button:
+            return checked_button.property("buildType")
+        return "release"  # fallback
     
-    def on_build_type_changed(self):
-        """Handle build type tab change"""
+    def on_build_type_selected(self, button):
+        """Handle build type button selection"""
+        build_type = button.property("buildType")
+        
+        # Trigger search with new build type selection
         self.search_files_internal("", limit=ClientConfig.DEFAULT_RESULTS_PER_PAGE)
     
     def on_search_completed(self, files: List[Dict], total: int):
@@ -431,6 +550,14 @@ class APKFinderMainWindow(QMainWindow):
         """Populate file table with data"""
         self.file_table.setRowCount(len(files))
         
+        # Temporarily disable selection change signal to avoid performance issues
+        try:
+            self.file_table.itemSelectionChanged.disconnect(self.on_file_selected)
+            reconnect_needed = True
+        except TypeError:
+            # Signal was not connected yet
+            reconnect_needed = False
+        
         for row, file in enumerate(files):
             # File name
             name_item = QTableWidgetItem(file["file_name"])
@@ -445,46 +572,33 @@ class APKFinderMainWindow(QMainWindow):
             build_item = QTableWidgetItem(file["build_type"])
             self.file_table.setItem(row, 2, build_item)
             
-            # Created time
-            created_time = datetime.fromisoformat(file["created_time"].replace('Z', '+00:00'))
-            time_item = QTableWidgetItem(created_time.strftime("%Y-%m-%d %H:%M"))
+            # Created time - optimize by caching formatted time
+            try:
+                created_time = datetime.fromisoformat(file["created_time"].replace('Z', '+00:00'))
+                time_str = created_time.strftime("%Y-%m-%d %H:%M")
+            except (ValueError, TypeError):
+                time_str = "Unknown"
+            time_item = QTableWidgetItem(time_str)
             self.file_table.setItem(row, 3, time_item)
             
             # Server
             server_item = QTableWidgetItem(file.get("server_prefix", "Unknown"))
             self.file_table.setItem(row, 4, server_item)
         
-        # Connect selection change
-        self.file_table.itemSelectionChanged.connect(self.on_file_selected)
+        # Re-connect selection change if it was previously connected
+        if reconnect_needed:
+            self.file_table.itemSelectionChanged.connect(self.on_file_selected)
     
     def on_file_selected(self):
         """Handle file selection"""
         current_row = self.file_table.currentRow()
         if current_row >= 0:
-            file_data = self.file_table.item(current_row, 0).data(Qt.UserRole)
-            self.show_file_info(file_data)
+            # Enable download button and update install button
             self.download_btn.setEnabled(True)
             self.update_install_button()
         else:
             self.download_btn.setEnabled(False)
             self.install_btn.setEnabled(False)
-    
-    def show_file_info(self, file_data: Dict):
-        """Show file information in download panel"""
-        info_text = f"""
-<b>File:</b> {file_data['file_name']}<br>
-<b>Size:</b> {format_file_size(file_data['file_size'])}<br>
-<b>Build Type:</b> {file_data['build_type']}<br>
-<b>Created:</b> {file_data['created_time']}<br>
-<b>Server:</b> {file_data['server_prefix']}<br>
-<b>Path:</b> {file_data['relative_path']}<br>
-<b>Downloads:</b> {file_data.get('download_time', 0)} times
-        """
-        
-        if file_data.get('md5'):
-            info_text += f"<br><b>MD5:</b> {file_data['md5']}"
-        
-        self.download_info.setHtml(info_text)
     
     def show_context_menu(self, position):
         """Show context menu for file table"""
@@ -514,16 +628,15 @@ class APKFinderMainWindow(QMainWindow):
         download_action.triggered.connect(self.download_selected_file)
         
         # Auto install submenu
-        devices = adb_manager.get_connected_devices()
-        if devices:
+        if self.cached_devices:
             install_menu = menu.addMenu(qta.icon('mdi.cellphone-android'), "Auto Install")
             
-            if len(devices) == 1:
-                device = devices[0]
+            if len(self.cached_devices) == 1:
+                device = self.cached_devices[0]
                 install_action = install_menu.addAction(f"{device['model']} ({device['serial']})")
                 install_action.triggered.connect(lambda: self.install_to_device(file_data, device['serial']))
             else:
-                for device in devices:
+                for device in self.cached_devices:
                     install_action = install_menu.addAction(f"{device['model']} ({device['serial']})")
                     install_action.triggered.connect(lambda checked, d=device: self.install_to_device(file_data, d['serial']))
         
@@ -610,17 +723,19 @@ class APKFinderMainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         
         if success:
-            self.status_label.setText(f"Downloaded: {os.path.basename(path_or_error)}")
+            file_name = os.path.basename(path_or_error)
+            self.status_label.setText(f"Downloaded: {file_name}")
             self.show_info(f"File downloaded successfully:\n{path_or_error}")
+            # Add to recent downloads
+            self.add_recent_download(file_name, path_or_error)
         else:
             self.status_label.setText("Download failed")
             self.show_error(f"Download failed: {path_or_error}")
     
     def auto_install_file(self):
         """Auto install selected file"""
-        devices = adb_manager.get_connected_devices()
-        if not devices:
-            self.show_error("No devices connected. Please connect a device and enable USB debugging.")
+        if not self.cached_devices:
+            self.show_error("No devices connected. Please connect a device and refresh devices list.")
             return
         
         current_row = self.file_table.currentRow()
@@ -629,11 +744,11 @@ class APKFinderMainWindow(QMainWindow):
         
         file_data = self.file_table.item(current_row, 0).data(Qt.UserRole)
         
-        if len(devices) == 1:
-            self.install_to_device(file_data, devices[0]['serial'])
+        if len(self.cached_devices) == 1:
+            self.install_to_device(file_data, self.cached_devices[0]['serial'])
         else:
             # Show device selection menu
-            self.show_device_selection(file_data, devices)
+            self.show_device_selection(file_data, self.cached_devices)
     
     def install_to_device(self, file_data: Dict, device_serial: str):
         """Install APK to specific device"""
@@ -657,20 +772,57 @@ class APKFinderMainWindow(QMainWindow):
     
     def update_install_button(self):
         """Update install button state"""
-        devices = adb_manager.get_connected_devices()
-        self.install_btn.setEnabled(len(devices) > 0)
+        self.install_btn.setEnabled(len(self.cached_devices) > 0)
     
     def refresh_devices(self):
         """Refresh connected devices"""
-        devices = adb_manager.get_connected_devices()
+        self.cached_devices = adb_manager.get_connected_devices()
         
-        if devices:
-            device_text = "\n".join([f"📱 {device['model']} ({device['serial']})" for device in devices])
+        if self.cached_devices:
+            device_text = "\n".join([f"📱 {device['model']} ({device['serial']})" for device in self.cached_devices])
         else:
             device_text = "No devices connected"
         
         self.device_list.setText(device_text)
         self.update_install_button()
+    
+    def add_recent_download(self, file_name: str, file_path: str):
+        """Add a file to recent downloads"""
+        download_info = {
+            "name": file_name,
+            "path": file_path,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # Remove if already exists
+        self.recent_downloads = [d for d in self.recent_downloads if d["name"] != file_name]
+        
+        # Add to beginning
+        self.recent_downloads.insert(0, download_info)
+        
+        # Keep only last 10 downloads
+        self.recent_downloads = self.recent_downloads[:10]
+        
+        # Update display
+        self.update_recent_downloads_display()
+    
+    def update_recent_downloads_display(self):
+        """Update recent downloads display"""
+        if not self.recent_downloads:
+            self.recent_downloads_list.setText("No recent downloads...")
+            return
+        
+        download_text = ""
+        for download in self.recent_downloads:
+            download_text += f"📁 {download['name']}\n"
+            download_text += f"   {download['time']}\n\n"
+        
+        self.recent_downloads_list.setText(download_text.strip())
+    
+    def clear_recent_downloads(self):
+        """Clear recent downloads list"""
+        self.recent_downloads.clear()
+        self.update_recent_downloads_display()
     
     def refresh_scan(self):
         """Refresh server scan"""
@@ -724,11 +876,32 @@ class APKFinderMainWindow(QMainWindow):
         
         QTimer.singleShot(100, check_async)
     
+    def toggle_inspector(self):
+        """Toggle UI inspector"""
+        if self.inspector_dialog is None:
+            from ui_inspector import UIInspector
+            self.inspector_dialog = UIInspector(self)
+            
+        if self.inspector_dialog.isVisible():
+            self.inspector_dialog.hide()
+        else:
+            self.inspector_dialog.show()
+            self.inspector_dialog.raise_()
+            self.inspector_dialog.activateWindow()
+    
     def show_settings(self):
         """Show settings dialog"""
         from settings_dialog import SettingsDialog
         dialog = SettingsDialog(self)
-        dialog.exec_()
+        
+        # Store current theme
+        current_theme = ClientConfig.get_setting("theme", "Light")
+        
+        if dialog.exec_() == dialog.Accepted:
+            # Check if theme changed
+            new_theme = ClientConfig.get_setting("theme", "Light")
+            if new_theme != current_theme:
+                self.apply_theme(new_theme)
     
     def show_file_details(self, file_data: Dict):
         """Show detailed file information"""
@@ -764,6 +937,69 @@ class APKFinderMainWindow(QMainWindow):
     def show_info(self, message: str):
         """Show info message"""
         QMessageBox.information(self, "Information", message)
+    
+    def apply_theme(self, theme: str = None):
+        """Apply theme to the application"""
+        if theme is None:
+            theme = ClientConfig.get_setting("theme", "Light")
+        
+        # Update global colors and style constants
+        update_colors(theme)
+        update_style_constants(theme)
+        
+        # Apply stylesheet
+        self.setStyleSheet(get_complete_style(theme))
+        
+        # Update icon colors based on theme
+        colors = get_theme_colors(theme)
+        # Keep the custom icon, don't change it based on theme
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "resources", "images.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        else:
+            # Fallback to font icon
+            self.setWindowIcon(qta.icon('mdi.android', color=colors["primary"]))
+        
+        # Update all buttons with new colors if they exist
+        if hasattr(self, 'refresh_btn'):
+            self.refresh_btn.setIcon(qta.icon('mdi.refresh', color=colors["white"]))
+            self.refresh_btn.setObjectName("primaryButton")
+        
+        if hasattr(self, 'inspector_btn'):
+            self.inspector_btn.setIcon(qta.icon('mdi.bug', color=colors["white"]))
+            self.inspector_btn.setObjectName("secondaryButton")
+        
+        if hasattr(self, 'settings_btn'):
+            self.settings_btn.setIcon(qta.icon('mdi.cog', color=colors["white"]))
+            self.settings_btn.setObjectName("secondaryButton")
+        
+        if hasattr(self, 'search_btn'):
+            self.search_btn.setIcon(qta.icon('mdi.magnify', color=colors["white"]))
+            self.search_btn.setObjectName("primaryButton")
+        
+        if hasattr(self, 'download_btn'):
+            self.download_btn.setIcon(qta.icon('mdi.download', color=colors["white"]))
+            self.download_btn.setObjectName("primaryButton")
+        
+        if hasattr(self, 'install_btn'):
+            self.install_btn.setIcon(qta.icon('mdi.cellphone-android', color=colors["white"]))
+            self.install_btn.setObjectName("secondaryButton")
+        
+        if hasattr(self, 'refresh_devices_btn'):
+            self.refresh_devices_btn.setIcon(qta.icon('mdi.refresh', color=colors["primary"]))
+            self.refresh_devices_btn.setObjectName("outlineButton")
+        
+        # Update build type buttons
+        if hasattr(self, 'release_btn'):
+            self.release_btn.setObjectName("buildTypeButton")
+        if hasattr(self, 'debug_btn'):
+            self.debug_btn.setObjectName("buildTypeButton")
+        if hasattr(self, 'combine_btn'):
+            self.combine_btn.setObjectName("buildTypeButton")
+        
+        # Update connection status colors if available
+        if hasattr(self, 'connection_label'):
+            self.check_connection()
     
     def closeEvent(self, event):
         """Handle application close"""

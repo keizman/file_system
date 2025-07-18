@@ -2,15 +2,16 @@ import os
 import tempfile
 from datetime import datetime
 from typing import Optional
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from config import Config
-from redis_client import redis_client
-from scanner import scanner
-from smb_client import smb_manager
+import time
+from .config import Config
+from .redis_client import redis_client
+from .scanner import scanner
+from .smb_client import smb_manager
 from shared.models import SearchRequest, SearchResponse, SystemStatus, DownloadRequest, FileInfo
 from shared.utils import calculate_md5
 
@@ -30,6 +31,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all incoming requests"""
+    start_time = time.time()
+    
+    # Log request details - use both print and logger to ensure visibility
+    print(f"🔄 Request: {request.method} {request.url}")
+    print(f"   Headers: {dict(request.headers)}")
+    print(f"   Query params: {dict(request.query_params)}")
+    print(f"   Client IP: {request.client.host}")
+    
+    logger.warning(f"🔄 Request: {request.method} {request.url}")
+    logger.warning(f"   Headers: {dict(request.headers)}")
+    logger.warning(f"   Query params: {dict(request.query_params)}")
+    logger.warning(f"   Client IP: {request.client.host}")
+    
+    # Process request
+    response = await call_next(request)
+    
+    # Log response details
+    process_time = time.time() - start_time
+    print(f"✅ Response: {response.status_code} - {process_time:.3f}s")
+    logger.warning(f"✅ Response: {response.status_code} - {process_time:.3f}s")
+    
+    return response
 
 # Security
 security = HTTPBearer()
@@ -110,8 +138,8 @@ async def refresh_scan(background_tasks: BackgroundTasks,
 
 
 @app.get("/api/download")
-async def download_file(path: str, server: str, token: str = Depends(verify_token)):
-    """Download APK file"""
+async def download_file(path: str, server: str, filename: Optional[str] = None, token: str = Depends(verify_token)):
+    """Download APK file with streaming"""
     try:
         # Validate server
         if server not in Config.FILE_SERVERS:
@@ -124,37 +152,38 @@ async def download_file(path: str, server: str, token: str = Depends(verify_toke
         if not client.file_exists(path):
             raise HTTPException(status_code=404, detail="File not found")
         
-        # Generate temporary file path
-        filename = os.path.basename(path)
-        temp_file = os.path.join(Config.TEMP_DIR, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{filename}")
+        # Get file stream and size
+        file_stream, file_size = client.download_file_stream(path)
         
-        # Download file
-        if not client.download_file(path, temp_file):
-            raise HTTPException(status_code=500, detail="Failed to download file")
+        # Use provided filename or extract from path
+        if not filename:
+            filename = os.path.basename(path)
         
-        # Calculate MD5 and update in Redis
-        md5_hash = calculate_md5(temp_file)
-        if md5_hash:
-            # Find directory from path
-            directory = path.split("\\")[1] if "\\" in path else ""
-            redis_client.update_file_md5(server, directory, path, md5_hash)
+        # Set up headers
+        headers = {
+            'Content-Disposition': f'attachment; filename="{filename}"',
+            'Content-Type': 'application/vnd.android.package-archive'
+        }
+        
+        if file_size is not None:
+            headers['Content-Length'] = str(file_size)
         
         # Increment download count
         directory = path.split("\\")[1] if "\\" in path else ""
         redis_client.increment_download_count(server, directory, path)
         
-        logger.info(f"File downloaded: {path} -> {temp_file}")
+        logger.info(f"Starting streaming download: {path} -> {filename}")
         
-        return FileResponse(
-            path=temp_file,
-            filename=filename,
+        return StreamingResponse(
+            file_stream,
+            headers=headers,
             media_type='application/vnd.android.package-archive'
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error downloading file: {e}")
+        logger.error(f"Error streaming file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

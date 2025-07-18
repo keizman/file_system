@@ -324,9 +324,61 @@ REDIS_CONN_STRING=redis://localhost:6379/0
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
+## Known Issues & Fixes
+
+### SMB File Name Extraction Issue (Fixed)
+
+**Problem**: Server startup shows errors like:
+```
+2025-07-18 15:49:26 | DEBUG | src.smb_client:list_directories:168 - No valid file name bytes found: None
+2025-07-18 15:49:26 | DEBUG | src.smb_client:list_directories:176 - Skipping entry with invalid file name: None
+```
+
+**Root Cause**: The SMB file name extraction was failing because the code wasn't properly accessing the `smbprotocol.file_info.FileDirectoryInformation` structure fields. The library requires specific access patterns for structure fields.
+
+**Solution**: Created a robust `extract_smb_file_name()` function with multiple fallback methods:
+
+1. **Primary Method**: Dictionary-style access with `.value` attribute
+   ```python
+   file_name_bytes = entry['file_name'].value
+   file_name = file_name_bytes.decode('utf-16le').rstrip('\x00')
+   ```
+
+2. **Fallback Methods**: 
+   - Attribute access: `entry.file_name.value`
+   - Method access: `entry.file_name.get_value()`
+   - Raw data extraction from packed structure
+
+**Files Modified**:
+- `server/src/smb_client.py` - Added `extract_smb_file_name()` function
+- Updated `list_directories()` method to use new extraction function
+- Updated `_scan_directory_recursive()` method to use new extraction function
+- Fixed file attributes access using same pattern
+
+**Technical Details**:
+- SMB file names are encoded as UTF-16 little endian
+- The `smbprotocol` library uses structure fields that need specific access patterns
+- Multiple fallback methods ensure compatibility across different library versions
+- Added proper error handling and debugging information
+
+**Testing**: 
+- ✅ All file name extraction methods work correctly
+- ✅ Supports complex file names with spaces and special characters
+- ✅ Proper UTF-16 decoding of international characters
+- ✅ No more "No valid file name bytes found" errors
+
+**Impact**: 
+- SMB scanning now works properly
+- Directory listing functions correctly
+- File servers can be scanned without errors
+- APK discovery and indexing works as expected
+
+---
+
 ## Support
 
 For support and questions:
 - Create an issue on GitHub
 - Check the troubleshooting section
 - Review server logs for error details
+- Check the "Known Issues & Fixes" section above

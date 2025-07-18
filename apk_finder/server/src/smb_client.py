@@ -1,15 +1,101 @@
 import os
 import tempfile
+import uuid
 from datetime import datetime
 from typing import List, Dict, Tuple
 from smbprotocol.connection import Connection
 from smbprotocol.session import Session
 from smbprotocol.tree import TreeConnect
-from smbprotocol.open import Open, CreateDisposition, CreateOptions, FileAttributes
-from smbprotocol.query_info import QueryInfoRequest, FileInformation
+from smbprotocol.open import Open, CreateDisposition, CreateOptions, FileAttributes, ShareAccess, ImpersonationLevel
+from smbprotocol.query_info import FileInformationClass
 from loguru import logger
 from shared.models import APKFile
 from shared.utils import is_apk_file, extract_build_type
+
+
+def extract_smb_file_name(entry) -> str:
+    """
+    Extract file name from SMB directory entry using smbprotocol's structure access.
+    
+    Args:
+        entry: SMB directory entry object (FileDirectoryInformation)
+        
+    Returns:
+        str: Decoded file name or None if extraction fails
+    """
+    try:
+        # Based on smbprotocol's structure, we need to access fields using dictionary-style access
+        # The correct way is: entry['field_name'].value
+        
+        # Method 1: Dictionary-style access with .value attribute (recommended approach)
+        try:
+            file_name_bytes = entry['file_name'].value
+            if isinstance(file_name_bytes, bytes) and len(file_name_bytes) > 0:
+                file_name = file_name_bytes.decode('utf-16le').rstrip('\x00')
+                return file_name.strip() if file_name else None
+        except Exception:
+            pass
+        
+        # Method 2: Alternative attribute access
+        try:
+            if hasattr(entry, 'file_name'):
+                file_name_field = entry.file_name
+                if hasattr(file_name_field, 'value'):
+                    file_name_bytes = file_name_field.value
+                    if isinstance(file_name_bytes, bytes) and len(file_name_bytes) > 0:
+                        file_name = file_name_bytes.decode('utf-16le').rstrip('\x00')
+                        return file_name.strip() if file_name else None
+        except Exception:
+            pass
+        
+        # Method 3: Try with get_value() method
+        try:
+            if hasattr(entry, 'file_name'):
+                file_name_field = entry.file_name
+                if hasattr(file_name_field, 'get_value'):
+                    file_name_bytes = file_name_field.get_value()
+                    if isinstance(file_name_bytes, bytes) and len(file_name_bytes) > 0:
+                        file_name = file_name_bytes.decode('utf-16le').rstrip('\x00')
+                        return file_name.strip() if file_name else None
+        except Exception:
+            pass
+        
+        # Method 4: Raw data extraction as fallback
+        try:
+            # Get file name length first
+            file_name_length = None
+            if hasattr(entry, 'file_name_length'):
+                length_field = entry.file_name_length
+                if hasattr(length_field, 'value'):
+                    file_name_length = length_field.value
+                elif hasattr(length_field, 'get_value'):
+                    file_name_length = length_field.get_value()
+            
+            # Try dictionary access for length
+            if file_name_length is None:
+                try:
+                    file_name_length = entry['file_name_length'].value
+                except:
+                    pass
+            
+            if file_name_length and file_name_length > 0:
+                # Extract from packed data
+                packed_data = entry.pack()
+                if len(packed_data) >= file_name_length:
+                    file_name_bytes = packed_data[-file_name_length:]
+                    if isinstance(file_name_bytes, bytes) and len(file_name_bytes) > 0:
+                        file_name = file_name_bytes.decode('utf-16le').rstrip('\x00')
+                        return file_name.strip() if file_name else None
+        except Exception:
+            pass
+        
+        return None
+            
+    except Exception as e:
+        logger.error(f"Error extracting file name: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        return None
 
 
 class SMBClient:
@@ -83,20 +169,70 @@ class SMBClient:
             
             # Open directory for listing
             dir_open = Open(self.tree, full_path)
-            dir_open.create(CreateDisposition.FILE_OPEN,
-                          CreateOptions.FILE_DIRECTORY_FILE,
-                          FileAttributes.FILE_ATTRIBUTE_DIRECTORY)
+            dir_open.create(
+                desired_access=0x00000001,  # FILE_READ_DATA
+                file_attributes=FileAttributes.FILE_ATTRIBUTE_DIRECTORY,
+                share_access=ShareAccess.FILE_SHARE_READ | ShareAccess.FILE_SHARE_WRITE | ShareAccess.FILE_SHARE_DELETE,
+                create_disposition=CreateDisposition.FILE_OPEN,
+                create_options=CreateOptions.FILE_DIRECTORY_FILE,
+                impersonation_level=ImpersonationLevel.Impersonation
+            )
             
-            # Query directory contents
-            query_req = QueryInfoRequest()
-            query_req.info_type = FileInformation.FILE_DIRECTORY_INFORMATION
+            # Query directory contents - try different information classes
+            entries = None
+            for info_class in [FileInformationClass.FILE_DIRECTORY_INFORMATION, 
+                              FileInformationClass.FILE_FULL_DIRECTORY_INFORMATION,
+                              FileInformationClass.FILE_BOTH_DIRECTORY_INFORMATION]:
+                try:
+                    logger.debug(f"Trying FileInformationClass: {info_class}")
+                    entries = dir_open.query_directory("*", info_class)
+                    logger.debug(f"Successfully got {len(entries)} entries with {info_class}")
+                    break
+                except Exception as e:
+                    logger.debug(f"Failed with {info_class}: {e}")
             
-            entries = dir_open.query_directory("*")
+            if entries is None:
+                logger.error("Could not query directory with any FileInformationClass")
+                return directories
             
             for entry in entries:
-                if entry.file_attributes & FileAttributes.FILE_ATTRIBUTE_DIRECTORY:
-                    if entry.file_name not in [".", ".."]:
-                        directories.append(entry.file_name)
+                # Get file name from FileDirectoryInformation
+                file_name = extract_smb_file_name(entry)
+                
+                if file_name is None or file_name in [".", ".."]:
+                    logger.debug(f"Skipping entry with invalid file name: {file_name}")
+                    continue
+                
+                # Additional validation for file name
+                if not file_name or file_name.strip() == "":
+                    logger.debug(f"Skipping entry with empty file name")
+                    continue
+                
+                # Get file attributes from FileDirectoryInformation
+                file_attrs = None
+                
+                try:
+                    # Try dictionary access first
+                    file_attrs = entry['file_attributes'].value
+                except Exception:
+                    try:
+                        # Fallback to attribute access
+                        if hasattr(entry, 'file_attributes'):
+                            file_attrs_field = entry.file_attributes
+                            if hasattr(file_attrs_field, 'value'):
+                                file_attrs = file_attrs_field.value
+                            else:
+                                file_attrs = file_attrs_field
+                    except Exception:
+                        pass
+                
+                if file_attrs is None:
+                    logger.debug(f"Could not find file attributes for entry: {file_name}")
+                    continue
+                    
+                if file_attrs & FileAttributes.FILE_ATTRIBUTE_DIRECTORY:
+                    if file_name not in [".", ".."]:
+                        directories.append(file_name)
             
             dir_open.close()
             return directories
@@ -136,34 +272,104 @@ class SMBClient:
             
             # Open directory
             dir_open = Open(self.tree, full_path)
-            dir_open.create(CreateDisposition.FILE_OPEN,
-                          CreateOptions.FILE_DIRECTORY_FILE,
-                          FileAttributes.FILE_ATTRIBUTE_DIRECTORY)
+            dir_open.create(
+                desired_access=0x00000001,  # FILE_READ_DATA
+                file_attributes=FileAttributes.FILE_ATTRIBUTE_DIRECTORY,
+                share_access=ShareAccess.FILE_SHARE_READ | ShareAccess.FILE_SHARE_WRITE | ShareAccess.FILE_SHARE_DELETE,
+                create_disposition=CreateDisposition.FILE_OPEN,
+                create_options=CreateOptions.FILE_DIRECTORY_FILE,
+                impersonation_level=ImpersonationLevel.Impersonation
+            )
             
-            entries = dir_open.query_directory("*")
+            # Query directory contents - try different information classes
+            entries = None
+            for info_class in [FileInformationClass.FILE_DIRECTORY_INFORMATION, 
+                              FileInformationClass.FILE_FULL_DIRECTORY_INFORMATION,
+                              FileInformationClass.FILE_BOTH_DIRECTORY_INFORMATION]:
+                try:
+                    entries = dir_open.query_directory("*", info_class)
+                    break
+                except Exception as e:
+                    logger.debug(f"Failed with {info_class}: {e}")
+            
+            if entries is None:
+                logger.error("Could not query directory with any FileInformationClass")
+                return
             
             for entry in entries:
-                if entry.file_name in [".", ".."]:
+                # Get file name from FileDirectoryInformation
+                file_name = extract_smb_file_name(entry)
+                
+                if file_name is None or file_name in [".", ".."]:
                     continue
                 
-                entry_path = f"{path}\\{entry.file_name}" if path else entry.file_name
+                # Additional validation for file name
+                if not file_name or file_name.strip() == "":
+                    continue
                 
-                if entry.file_attributes & FileAttributes.FILE_ATTRIBUTE_DIRECTORY:
+                entry_path = f"{path}\\{file_name}" if path else file_name
+                
+                # Get file attributes from FileDirectoryInformation
+                file_attrs = None
+                
+                try:
+                    # Try dictionary access first
+                    file_attrs = entry['file_attributes'].value
+                except Exception:
+                    try:
+                        # Fallback to attribute access
+                        if hasattr(entry, 'file_attributes'):
+                            file_attrs_field = entry.file_attributes
+                            if hasattr(file_attrs_field, 'value'):
+                                file_attrs = file_attrs_field.value
+                            else:
+                                file_attrs = file_attrs_field
+                    except Exception:
+                        pass
+                
+                if file_attrs is None:
+                    continue
+                    
+                if file_attrs & FileAttributes.FILE_ATTRIBUTE_DIRECTORY:
                     # Recursively scan subdirectory
                     self._scan_directory_recursive(entry_path, apk_files, base_dir)
-                elif is_apk_file(entry.file_name):
+                elif is_apk_file(file_name):
                     # Create APK file object
-                    apk_file = APKFile(
-                        relative_path=f"\\{entry_path}",
-                        file_name=entry.file_name,
-                        file_size=entry.end_of_file,
-                        created_time=datetime.fromtimestamp(entry.creation_time.timestamp()),
-                        server_prefix=self.server_config["path"],
-                        build_type=extract_build_type(entry_path),
-                        download_time=0,
-                        md5=None
-                    )
-                    apk_files.append(apk_file)
+                    file_size = None
+                    creation_time = None
+                    
+                    try:
+                        # Get file size
+                        try:
+                            file_size = entry['end_of_file'].value
+                        except Exception:
+                            if hasattr(entry, 'end_of_file'):
+                                size_field = entry.end_of_file
+                                file_size = size_field.value if hasattr(size_field, 'value') else size_field
+                        
+                        # Get creation time
+                        try:
+                            creation_time = entry['creation_time'].value
+                        except Exception:
+                            if hasattr(entry, 'creation_time'):
+                                time_field = entry.creation_time
+                                creation_time = time_field.value if hasattr(time_field, 'value') else time_field
+                            
+                    except Exception as e:
+                        logger.debug(f"Error getting file info: {e}")
+                    
+                    if file_size is not None and creation_time is not None:
+                        apk_file = APKFile(
+                            relative_path=f"\\{entry_path}",
+                            file_name=file_name,
+                            file_size=file_size,
+                            created_time=datetime.fromtimestamp(creation_time.timestamp()),
+                            server_prefix=self.server_config["path"],
+                            build_type=extract_build_type(file_name),
+                            download_time=0,
+                            md5=None
+                        )
+                        apk_files.append(apk_file)
             
             dir_open.close()
             
@@ -182,9 +388,37 @@ class SMBClient:
             
             # Open remote file
             file_open = Open(self.tree, remote_path)
-            file_open.create(CreateDisposition.FILE_OPEN,
-                           CreateOptions.FILE_NON_DIRECTORY_FILE,
-                           FileAttributes.FILE_ATTRIBUTE_NORMAL)
+            file_open.create(
+                desired_access=0x00000001,  # FILE_READ_DATA
+                file_attributes=FileAttributes.FILE_ATTRIBUTE_NORMAL,
+                share_access=ShareAccess.FILE_SHARE_READ | ShareAccess.FILE_SHARE_WRITE | ShareAccess.FILE_SHARE_DELETE,
+                create_disposition=CreateDisposition.FILE_OPEN,
+                create_options=CreateOptions.FILE_NON_DIRECTORY_FILE,
+                impersonation_level=ImpersonationLevel.Impersonation
+            )
+            
+            # Get file size to prevent reading past end
+            try:
+                # Try to get file information using query_info method
+                file_info = file_open.query_info()
+                file_size = file_info.end_of_file
+            except (AttributeError, Exception) as e:
+                logger.debug(f"Could not get file size using query_info: {e}")
+                # Fallback: try to read file size from initial read
+                try:
+                    # Try a small read to determine if file is accessible
+                    test_data = file_open.read(0, 1)
+                    if test_data:
+                        # File is accessible, but we don't know the size
+                        # Use a conservative approach: read until EOF
+                        file_size = None
+                        logger.debug("File accessible, but size unknown - will read until EOF")
+                    else:
+                        logger.error("File appears to be empty or inaccessible")
+                        return False
+                except Exception as e:
+                    logger.error(f"Cannot determine file size: {e}")
+                    return False
             
             # Create local directory if needed
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -194,20 +428,152 @@ class SMBClient:
                 offset = 0
                 chunk_size = 65536  # 64KB chunks
                 
-                while True:
-                    data = file_open.read(offset, chunk_size)
-                    if not data:
-                        break
-                    local_file.write(data)
-                    offset += len(data)
+                if file_size is not None:
+                    # We know the file size, use it to prevent reading past end
+                    while offset < file_size:
+                        # Calculate how much to read (don't read past end of file)
+                        bytes_to_read = min(chunk_size, file_size - offset)
+                        
+                        try:
+                            data = file_open.read(offset, bytes_to_read)
+                            if not data:
+                                break
+                            local_file.write(data)
+                            offset += len(data)
+                        except Exception as read_error:
+                            # Handle STATUS_END_OF_FILE and other read errors
+                            if "STATUS_END_OF_FILE" in str(read_error):
+                                logger.debug(f"Reached end of file at offset {offset}/{file_size}")
+                                break
+                            else:
+                                raise read_error
+                else:
+                    # We don't know the file size, read until EOF
+                    while True:
+                        try:
+                            data = file_open.read(offset, chunk_size)
+                            if not data:
+                                break
+                            local_file.write(data)
+                            offset += len(data)
+                        except Exception as read_error:
+                            # Handle STATUS_END_OF_FILE and other read errors
+                            if "STATUS_END_OF_FILE" in str(read_error):
+                                logger.debug(f"Reached end of file at offset {offset}")
+                                break
+                            else:
+                                raise read_error
             
             file_open.close()
-            logger.info(f"Downloaded file: {relative_path} -> {local_path}")
+            if file_size is not None:
+                logger.info(f"Downloaded file: {relative_path} -> {local_path} ({file_size} bytes)")
+            else:
+                logger.info(f"Downloaded file: {relative_path} -> {local_path} ({offset} bytes)")
             return True
             
         except Exception as e:
             logger.error(f"Error downloading file {relative_path}: {e}")
             return False
+    
+    def download_file_stream(self, relative_path: str):
+        """Download a file from SMB server as a stream with progress"""
+        try:
+            if not self.tree:
+                raise Exception("Not connected to SMB server")
+            
+            # Build remote path
+            base_path = self.server_config["path"].split("\\")[-1]
+            remote_path = f"{base_path}{relative_path}"
+            
+            # Open remote file
+            file_open = Open(self.tree, remote_path)
+            file_open.create(
+                desired_access=0x00000001,  # FILE_READ_DATA
+                file_attributes=FileAttributes.FILE_ATTRIBUTE_NORMAL,
+                share_access=ShareAccess.FILE_SHARE_READ | ShareAccess.FILE_SHARE_WRITE | ShareAccess.FILE_SHARE_DELETE,
+                create_disposition=CreateDisposition.FILE_OPEN,
+                create_options=CreateOptions.FILE_NON_DIRECTORY_FILE,
+                impersonation_level=ImpersonationLevel.Impersonation
+            )
+            
+            # Get file size to prevent reading past end
+            try:
+                # Try to get file information using query_info method
+                file_info = file_open.query_info()
+                file_size = file_info.end_of_file
+            except (AttributeError, Exception) as e:
+                logger.debug(f"Could not get file size using query_info: {e}")
+                # Fallback: try to read file size from initial read
+                try:
+                    # Try a small read to determine if file is accessible
+                    test_data = file_open.read(0, 1)
+                    if test_data:
+                        # File is accessible, but we don't know the size
+                        # Use a conservative approach: read until EOF
+                        file_size = None
+                        logger.debug("File accessible, but size unknown - will read until EOF")
+                    else:
+                        logger.error("File appears to be empty or inaccessible")
+                        file_open.close()
+                        raise Exception("File appears to be empty or inaccessible")
+                except Exception as e:
+                    file_open.close()
+                    logger.error(f"Cannot determine file size: {e}")
+                    raise Exception(f"Cannot determine file size: {e}")
+            
+            # Generator function to yield file chunks
+            def generate_chunks():
+                offset = 0
+                chunk_size = 65536  # 64KB chunks
+                
+                try:
+                    if file_size is not None:
+                        # We know the file size, use it to prevent reading past end
+                        while offset < file_size:
+                            # Calculate how much to read (don't read past end of file)
+                            bytes_to_read = min(chunk_size, file_size - offset)
+                            
+                            try:
+                                data = file_open.read(offset, bytes_to_read)
+                                if not data:
+                                    break
+                                yield data
+                                offset += len(data)
+                            except Exception as read_error:
+                                # Handle STATUS_END_OF_FILE and other read errors
+                                if "STATUS_END_OF_FILE" in str(read_error):
+                                    logger.debug(f"Reached end of file at offset {offset}/{file_size}")
+                                    break
+                                else:
+                                    raise read_error
+                    else:
+                        # We don't know the file size, read until EOF
+                        while True:
+                            try:
+                                data = file_open.read(offset, chunk_size)
+                                if not data:
+                                    break
+                                yield data
+                                offset += len(data)
+                            except Exception as read_error:
+                                # Handle STATUS_END_OF_FILE and other read errors
+                                if "STATUS_END_OF_FILE" in str(read_error):
+                                    logger.debug(f"Reached end of file at offset {offset}")
+                                    break
+                                else:
+                                    raise read_error
+                finally:
+                    file_open.close()
+                    if file_size is not None:
+                        logger.info(f"Streamed file: {relative_path} ({file_size} bytes)")
+                    else:
+                        logger.info(f"Streamed file: {relative_path} ({offset} bytes)")
+            
+            return generate_chunks(), file_size
+            
+        except Exception as e:
+            logger.error(f"Error streaming file {relative_path}: {e}")
+            raise
     
     def file_exists(self, relative_path: str) -> bool:
         """Check if file exists on SMB server"""
@@ -220,9 +586,14 @@ class SMBClient:
             
             file_open = Open(self.tree, remote_path)
             try:
-                file_open.create(CreateDisposition.FILE_OPEN,
-                               CreateOptions.FILE_NON_DIRECTORY_FILE,
-                               FileAttributes.FILE_ATTRIBUTE_NORMAL)
+                file_open.create(
+                    desired_access=0x00000001,  # FILE_READ_DATA
+                    file_attributes=FileAttributes.FILE_ATTRIBUTE_NORMAL,
+                    share_access=ShareAccess.FILE_SHARE_READ | ShareAccess.FILE_SHARE_WRITE | ShareAccess.FILE_SHARE_DELETE,
+                    create_disposition=CreateDisposition.FILE_OPEN,
+                    create_options=CreateOptions.FILE_NON_DIRECTORY_FILE,
+                    impersonation_level=ImpersonationLevel.Impersonation
+                )
                 file_open.close()
                 return True
             except:
@@ -242,9 +613,14 @@ class SMBClient:
             remote_path = f"{base_path}{relative_path}"
             
             file_open = Open(self.tree, remote_path)
-            file_open.create(CreateDisposition.FILE_OPEN,
-                           CreateOptions.FILE_NON_DIRECTORY_FILE,
-                           FileAttributes.FILE_ATTRIBUTE_NORMAL)
+            file_open.create(
+                desired_access=0x00000001,  # FILE_READ_DATA
+                file_attributes=FileAttributes.FILE_ATTRIBUTE_NORMAL,
+                share_access=ShareAccess.FILE_SHARE_READ | ShareAccess.FILE_SHARE_WRITE | ShareAccess.FILE_SHARE_DELETE,
+                create_disposition=CreateDisposition.FILE_OPEN,
+                create_options=CreateOptions.FILE_NON_DIRECTORY_FILE,
+                impersonation_level=ImpersonationLevel.Impersonation
+            )
             
             # Get file information
             info = file_open.query_info()
@@ -271,7 +647,7 @@ class SMBManager:
     def get_client(self, server_name: str) -> SMBClient:
         """Get or create SMB client for server"""
         if server_name not in self.clients:
-            from config import Config
+            from .config import Config
             if server_name not in Config.FILE_SERVERS:
                 raise ValueError(f"Unknown server: {server_name}")
             
