@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 import qtawesome as qta
-from ui.styles import COMPLETE_STYLE, BUTTON_STYLE, COLORS
+from ui.styles import get_complete_style, COLORS, get_theme_colors, update_colors, update_style_constants
 from config import ClientConfig
 
 
@@ -15,7 +15,8 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Settings")
         self.setModal(True)
         self.resize(600, 500)
-        self.setStyleSheet(COMPLETE_STYLE)
+        # Apply theme
+        self.apply_theme()
         
         self.init_ui()
         self.load_settings()
@@ -109,7 +110,7 @@ class SettingsDialog(QDialog):
         test_layout = QHBoxLayout()
         self.test_connection_btn = QPushButton("Test Connection")
         self.test_connection_btn.setIcon(qta.icon('mdi.network', color=COLORS["white"]))
-        self.test_connection_btn.setStyleSheet(BUTTON_STYLE)
+        self.test_connection_btn.setObjectName("primaryButton")
         self.test_connection_btn.clicked.connect(self.test_connection)
         test_layout.addWidget(self.test_connection_btn)
         test_layout.addStretch()
@@ -153,6 +154,7 @@ class SettingsDialog(QDialog):
         download_layout.addWidget(self.download_path)
         
         browse_btn = QPushButton("Browse...")
+        browse_btn.setObjectName("secondaryButton")  # Set button style
         browse_btn.clicked.connect(self.browse_download_path)
         download_layout.addWidget(browse_btn)
         
@@ -164,6 +166,7 @@ class SettingsDialog(QDialog):
         temp_layout.addWidget(self.temp_path)
         
         browse_temp_btn = QPushButton("Browse...")
+        browse_temp_btn.setObjectName("secondaryButton")  # Set button style
         browse_temp_btn.clicked.connect(self.browse_temp_path)
         temp_layout.addWidget(browse_temp_btn)
         
@@ -205,6 +208,7 @@ class SettingsDialog(QDialog):
         
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["Light", "Dark", "Auto"])
+        self.theme_combo.currentTextChanged.connect(self.on_theme_changed)
         appearance_layout.addRow("Theme:", self.theme_combo)
         
         self.font_size = QSpinBox()
@@ -291,7 +295,7 @@ class SettingsDialog(QDialog):
         clear_cache_layout = QHBoxLayout()
         self.clear_cache_btn = QPushButton("Clear Cache")
         self.clear_cache_btn.setIcon(qta.icon('mdi.delete', color=COLORS["white"]))
-        self.clear_cache_btn.setStyleSheet(BUTTON_STYLE)
+        self.clear_cache_btn.setObjectName("primaryButton")
         self.clear_cache_btn.clicked.connect(self.clear_cache)
         clear_cache_layout.addWidget(self.clear_cache_btn)
         clear_cache_layout.addStretch()
@@ -338,7 +342,7 @@ class SettingsDialog(QDialog):
         # Download settings
         self.download_path.setText(config.get("download_path", ClientConfig.DEFAULT_DOWNLOAD_PATH))
         self.temp_path.setText(config.get("temp_path", ClientConfig.CACHE_DIR))
-        self.auto_verify_md5.setChecked(config.get("auto_verify_md5", True))
+        self.auto_verify_md5.setChecked(config.get("auto_verify_md5", False))
         self.overwrite_existing.setChecked(config.get("overwrite_existing", False))
         self.open_download_folder.setChecked(config.get("open_download_folder", False))
         self.max_concurrent_downloads.setValue(config.get("max_concurrent_downloads", 3))
@@ -496,6 +500,37 @@ class SettingsDialog(QDialog):
         """Accept and save settings"""
         self.save_settings()
         self.accept()
+    
+    def apply_theme(self, theme: str = None):
+        """Apply theme to the settings dialog"""
+        if theme is None:
+            theme = ClientConfig.get_setting("theme", "Light")
+        
+        # Apply stylesheet
+        self.setStyleSheet(get_complete_style(theme))
+        
+        # Update icon colors based on theme if buttons exist
+        colors = get_theme_colors(theme)
+        if hasattr(self, 'test_connection_btn'):
+            self.test_connection_btn.setIcon(qta.icon('mdi.network', color=colors["white"]))
+        if hasattr(self, 'clear_cache_btn'):
+            self.clear_cache_btn.setIcon(qta.icon('mdi.delete', color=colors["white"]))
+    
+    def on_theme_changed(self, theme: str):
+        """Handle theme change in real-time"""
+        # Save the theme setting immediately
+        ClientConfig.set_setting("theme", theme)
+        
+        # Update global colors and styles
+        update_colors(theme)
+        update_style_constants(theme)
+        
+        # Apply theme to dialog
+        self.apply_theme(theme)
+        
+        # Update parent window theme as well
+        if self.parent():
+            self.parent().apply_theme(theme)
     
     def reject(self):
         """Reject changes"""

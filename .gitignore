@@ -1,0 +1,8 @@
+*.env*
+.claude/settings.local.json
+apk_finder/*/*/__pycache__/
+*.log
+CLAUDE.md
+apk_finder/*/__pycache__/
+test_*.py
+apk_finder/server/tmp/

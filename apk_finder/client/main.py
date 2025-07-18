@@ -9,7 +9,7 @@ import os
 import signal
 from PyQt5.QtWidgets import QApplication, QMessageBox, QSplashScreen
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QPixmap, QFont
+from PyQt5.QtGui import QPixmap, QFont, QIcon, QPainter
 import qtawesome as qta
 
 # Add src directory to path
@@ -28,11 +28,28 @@ class APKFinderApp(QApplication):
         self.setApplicationVersion("1.0.0")
         self.setOrganizationName("APK Finder")
         
+        # Set Windows Application ID for taskbar icon
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("APKFinder.APKFinder.1.0.0")
+        except:
+            pass  # Ignore errors on non-Windows systems
+        
         # Load configuration
         self.load_config()
         
         # Set application icon
-        self.setWindowIcon(qta.icon('mdi.android', color='#3B82F6'))
+        icon_path = os.path.join(os.path.dirname(__file__), "resources", "images.ico")
+        if os.path.exists(icon_path):
+            app_icon = QIcon(icon_path)
+            self.setWindowIcon(app_icon)
+            # Force set as application icon for taskbar
+            QApplication.setWindowIcon(app_icon)
+        else:
+            # Fallback to font icon
+            fallback_icon = qta.icon('mdi.android', color='#3B82F6')
+            self.setWindowIcon(fallback_icon)
+            QApplication.setWindowIcon(fallback_icon)
         
         # Create and show splash screen
         self.splash = self.create_splash_screen()
@@ -54,16 +71,57 @@ class APKFinderApp(QApplication):
             font = QFont("Segoe UI", font_size)
             self.setFont(font)
             
-            # Set theme (placeholder for future implementation)
+            # Apply theme
             theme = config.get("theme", "Light")
-            # TODO: Implement theme switching
+            from ui.styles import update_colors
+            update_colors(theme)
             
         except Exception as e:
             print(f"Error loading configuration: {e}")
     
     def create_splash_screen(self):
         """Create splash screen"""
-        # Create a simple splash screen
+        # Try to load custom icon for splash screen
+        icon_path = os.path.join(os.path.dirname(__file__), "resources", "images.ico")
+        
+        if os.path.exists(icon_path):
+            # Load and scale the icon
+            icon = QPixmap(icon_path)
+            if not icon.isNull():
+                # Scale icon to reasonable size while maintaining aspect ratio
+                icon = icon.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                
+                # Create larger splash screen with icon embedded
+                splash_pix = QPixmap(400, 300)
+                splash_pix.fill(Qt.white)
+                
+                # Draw the icon on the splash screen
+                painter = QPainter(splash_pix)
+                painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                
+                # Calculate position to center the icon
+                icon_x = (splash_pix.width() - icon.width()) // 2
+                icon_y = (splash_pix.height() - icon.height()) // 2 - 30  # Move up a bit for text
+                
+                painter.drawPixmap(icon_x, icon_y, icon)
+                painter.end()
+                
+                # Create splash screen
+                splash = QSplashScreen(splash_pix, Qt.WindowStaysOnTopHint)
+                
+                # Set custom icon for splash screen window (for taskbar)
+                splash.setWindowIcon(QIcon(icon_path))
+                
+                # Show loading message
+                splash.showMessage(
+                    "Loading APK Finder...\nVersion 1.0.0", 
+                    Qt.AlignHCenter | Qt.AlignBottom, 
+                    Qt.black
+                )
+                
+                return splash
+        
+        # Fallback to simple splash screen
         splash_pix = QPixmap(400, 300)
         splash_pix.fill(Qt.white)
         

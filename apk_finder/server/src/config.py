@@ -1,9 +1,14 @@
 import os
 from typing import Dict, List
-from dotenv import load_dotenv
 from shared.utils import parse_interval
 
-load_dotenv()
+# Try to load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # python-dotenv not installed, environment variables will still work
+    pass
 
 
 class Config:
@@ -22,7 +27,7 @@ class Config:
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     
     # Security
-    API_TOKEN = os.getenv("API_TOKEN", "default_token")
+    API_TOKEN = os.getenv("API_TOKEN", "cs")
     
     # Paths
     TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tmp")
@@ -36,16 +41,17 @@ class Config:
             server_key = f"FILE_SERVER_{i}"
             user_key = f"FILE_SERVER_{i}_USER"
             pass_key = f"FILE_SERVER_{i}_PASS"
+            name_key = f"FILE_SERVER_{i}_NAME"
             
             server_path = os.getenv(server_key)
             if not server_path:
                 break
-                
+            
             cls.FILE_SERVERS[f"server_{i}"] = {
                 "path": server_path,
                 "username": os.getenv(user_key, ""),
                 "password": os.getenv(pass_key, ""),
-                "name": f"Server {i}"
+                "name": os.getenv(name_key, f"Server {i}")
             }
             i += 1
     

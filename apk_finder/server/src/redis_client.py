@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 from datetime import datetime
 from loguru import logger
 from shared.models import APKFile
-from config import Config
+from .config import Config
 
 
 class RedisClient:
@@ -15,11 +15,12 @@ class RedisClient:
     def connect(self):
         """Connect to Redis"""
         try:
+            logger.info(f"Attempting to connect to Redis: {Config.REDIS_CONN_STRING}")
             self.client = redis.from_url(Config.REDIS_CONN_STRING)
             self.client.ping()
-            logger.info("Connected to Redis successfully")
+            logger.info("✓ Connected to Redis successfully")
         except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
+            logger.error(f"✗ Failed to connect to Redis: {e}")
             raise
     
     def get_apk_files(self, server_name: str, directory: str) -> List[APKFile]:
@@ -119,9 +120,9 @@ class RedisClient:
                 if file.build_type != build_type:
                     continue
             
-            # Filter by keywords
+            # Filter by keywords (search only in file name, not full path)
             if keywords:
-                file_text = f"{file.file_name} {file.relative_path}".lower()
+                file_text = file.file_name.lower()
                 if not all(kw in file_text for kw in keywords):
                     continue
             
@@ -132,6 +133,10 @@ class RedisClient:
     def get_system_status(self) -> Dict:
         """Get system status information"""
         try:
+            # Test Redis connection
+            self.client.ping()
+            logger.debug("Redis connection status: OK")
+            
             status = {
                 "redis_connected": True,
                 "total_servers": len(Config.FILE_SERVERS),
@@ -175,7 +180,7 @@ class RedisClient:
             return status
             
         except Exception as e:
-            logger.error(f"Error getting system status: {e}")
+            logger.error(f"✗ Redis connection failed during system status check: {e}")
             return {"redis_connected": False, "error": str(e)}
     
     def increment_download_count(self, server_name: str, directory: str, file_path: str):

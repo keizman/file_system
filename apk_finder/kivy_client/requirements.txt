@@ -1,0 +1,35 @@
+# Kivy Client Requirements
+
+# Core Kivy framework
+kivy>=2.1.0
+kivymd>=1.1.1
+
+# HTTP client for API communication
+httpx>=0.24.0
+
+# Date/time handling
+python-dateutil>=2.8.0
+
+# File path handling
+pathlib>=1.0.0
+
+# JSON handling (built-in, but for completeness)
+# json
+
+# Threading support (built-in)
+# threading
+
+# Async support (built-in)
+# asyncio
+
+# Android specific dependencies (for buildozer)
+# These will be automatically handled by buildozer
+# but listed here for reference
+# pyjnius  # For Android Java integration
+# plyer    # For platform-specific features
+
+# Development dependencies (optional)
+# pytest>=7.0.0
+# pytest-asyncio>=0.21.0
+# black>=23.0.0
+# flake8>=6.0.0

@@ -7,6 +7,10 @@ Main entry point for the server application
 import sys
 import os
 import signal
+
+# Add the current directory to Python path to allow imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from loguru import logger
 from src.config import Config
 from src.api import app
@@ -55,6 +59,14 @@ def main():
     logger.info(f"  Log Level: {Config.LOG_LEVEL}")
     logger.info(f"  Update Interval: {Config.UPDATE_INTERVAL}s")
     logger.info(f"  File Servers: {len(Config.FILE_SERVERS)}")
+    
+    # Test Redis connection
+    try:
+        from src.redis_client import redis_client
+        logger.info("Redis connection test passed")
+    except Exception as e:
+        logger.error(f"Redis connection test failed: {e}")
+        logger.warning("Server will continue but Redis features may not work")
     
     try:
         import uvicorn

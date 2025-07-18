@@ -4,9 +4,9 @@ from datetime import datetime
 from typing import Dict, List
 from apscheduler.schedulers.background import BackgroundScheduler
 from loguru import logger
-from config import Config
-from redis_client import redis_client
-from smb_client import smb_manager
+from .config import Config
+from .redis_client import redis_client
+from .smb_client import smb_manager
 from shared.models import APKFile
 
 
