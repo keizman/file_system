@@ -690,11 +690,21 @@ class SMBClient:
             tuple: (file_stream_generator, file_size)
         """
         logger.info(f"Starting smbclient download: {path}")
+        logger.debug(f"Server config path: {self.server_config['path']}")
         
-        # Construct full UNC path
-        if path.startswith('\\'):
-            path = path[1:]
-        unc_path = f"\\\\{self.host}\\{self.share}\\{path}"
+        # Parse server config to get the complete UNC path
+        server_path = self.server_config["path"]  # e.g., \\192.168.1.37\yw\apks
+        
+        # Construct full UNC path by combining server config path with requested path
+        if server_path.endswith("\\"):
+            server_path = server_path[:-1]  # Remove trailing backslash
+        
+        if path.startswith("\\"):
+            unc_path = f"{server_path}{path}"
+        else:
+            unc_path = f"{server_path}\\{path}"
+        
+        logger.debug(f"Constructed UNC path: {unc_path}")
         
         try:
             import smbclient
