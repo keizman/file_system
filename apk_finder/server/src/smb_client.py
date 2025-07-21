@@ -105,6 +105,10 @@ class SMBClient:
         self.session = None
         self.tree = None
         self.server_name = server_config.get("name", "Unknown")
+        self.host = None
+        self.share = None
+        self.username = server_config.get("username", "")
+        self.password = server_config.get("password", "")
     
     def connect(self) -> bool:
         """Connect to SMB server"""
@@ -118,6 +122,10 @@ class SMBClient:
             parts = server_path.replace("\\", "/").split("/")
             server_ip = parts[2]
             share_name = parts[3] if len(parts) > 3 else "C$"
+            
+            # Store host and share for later use
+            self.host = server_ip
+            self.share = share_name
             
             # Create connection
             self.connection = Connection(uuid.uuid4(), server_ip, 445)
@@ -713,6 +721,172 @@ class SMBClient:
         except Exception as e:
             logger.error(f"smbclient download failed: {e}")
             raise
+    
+    def download_file_range_stream(self, path: str, start: int, end: int):
+        """
+        下载文件的指定范围，支持断点续传
+        
+        Args:
+            path: 文件路径
+            start: 开始字节位置
+            end: 结束字节位置 (包含)
+            
+        Returns:
+            generator: 文件流生成器
+        """
+        logger.info(f"Starting range download: {path} [{start}-{end}]")
+        
+        # Try smbclient first if available
+        try:
+            import smbclient
+            
+            # Configure credentials if not already done
+            smbclient.ClientConfig(
+                username=self.username,
+                password=self.password
+            )
+            
+            # Construct full UNC path
+            if path.startswith('\\'):
+                path = path[1:]
+            unc_path = f"\\\\{self.host}\\{self.share}\\{path}"
+            
+            def range_stream():
+                try:
+                    with smbclient.open_file(unc_path, mode='rb', buffering=0) as f:
+                        # Seek to start position
+                        f.seek(start)
+                        
+                        remaining = end - start + 1
+                        chunk_size = min(64 * 1024, remaining)  # 64KB chunks or remaining bytes
+                        
+                        while remaining > 0:
+                            bytes_to_read = min(chunk_size, remaining)
+                            data = f.read(bytes_to_read)
+                            if not data:
+                                break
+                            yield data
+                            remaining -= len(data)
+                            
+                except Exception as e:
+                    logger.error(f"Error reading range with smbclient: {e}")
+                    raise
+            
+            return range_stream()
+            
+        except ImportError:
+            logger.error("smbclient not available for range download")
+            raise Exception("smbclient required for range downloads")
+        except Exception as e:
+            logger.error(f"Range download with smbclient failed: {e}")
+            # Fall back to low-level API
+            return self._download_range_low_level(path, start, end)
+    
+    def _download_range_low_level(self, path: str, start: int, end: int):
+        """
+        使用低级API下载文件范围
+        """
+        if not self.tree:
+            raise Exception("SMB connection not established")
+        
+        base_path = self.server_config["path"].split("\\")[-1]
+        remote_path = f"{base_path}{path}"
+        
+        file_open = Open(self.tree, remote_path)
+        
+        try:
+            file_open.create(
+                desired_access=0x00000001,  # FILE_READ_DATA
+                file_attributes=FileAttributes.FILE_ATTRIBUTE_NORMAL,
+                share_access=ShareAccess.FILE_SHARE_READ | ShareAccess.FILE_SHARE_WRITE | ShareAccess.FILE_SHARE_DELETE,
+                create_disposition=CreateDisposition.FILE_OPEN,
+                create_options=CreateOptions.FILE_NON_DIRECTORY_FILE,
+                impersonation_level=ImpersonationLevel.Impersonation
+            )
+            
+            def range_stream():
+                try:
+                    offset = start
+                    remaining = end - start + 1
+                    chunk_size = min(65536, remaining)  # 64KB chunks
+                    
+                    while remaining > 0 and offset <= end:
+                        bytes_to_read = min(chunk_size, remaining)
+                        
+                        try:
+                            data = file_open.read(offset, bytes_to_read)
+                            if not data:
+                                break
+                            yield data
+                            offset += len(data)
+                            remaining -= len(data)
+                        except Exception as read_error:
+                            if "STATUS_END_OF_FILE" in str(read_error):
+                                logger.debug(f"Reached end of file at offset {offset}")
+                                break
+                            else:
+                                raise read_error
+                                
+                finally:
+                    file_open.close()
+                    logger.info(f"Range download completed: {path} [{start}-{end}]")
+            
+            return range_stream()
+            
+        except Exception as e:
+            logger.error(f"Error in range download {path}: {e}")
+            try:
+                file_open.close()
+            except:
+                pass
+            raise
+    
+    def download_file_stream_with_skip(self, path: str, start: int, end: int):
+        """
+        下载文件并跳过到指定位置（当范围下载不可用时的后备方案）
+        """
+        logger.warning(f"Using skip method for range download: {path} [{start}-{end}]")
+        
+        # Get normal file stream
+        try:
+            file_stream, _ = self.download_file_stream_smbclient(path)
+        except:
+            file_stream, _ = self.download_file_stream(path)
+        
+        def skip_stream():
+            bytes_skipped = 0
+            bytes_served = 0
+            target_bytes = end - start + 1
+            
+            for chunk in file_stream:
+                if bytes_skipped < start:
+                    # Still skipping to start position
+                    skip_in_chunk = min(len(chunk), start - bytes_skipped)
+                    bytes_skipped += skip_in_chunk
+                    
+                    if bytes_skipped >= start:
+                        # Start serving from this chunk
+                        serve_from = skip_in_chunk
+                        remaining_in_chunk = len(chunk) - serve_from
+                        bytes_to_serve = min(remaining_in_chunk, target_bytes - bytes_served)
+                        
+                        if bytes_to_serve > 0:
+                            yield chunk[serve_from:serve_from + bytes_to_serve]
+                            bytes_served += bytes_to_serve
+                            
+                        if bytes_served >= target_bytes:
+                            break
+                else:
+                    # Already at serving position
+                    bytes_to_serve = min(len(chunk), target_bytes - bytes_served)
+                    if bytes_to_serve > 0:
+                        yield chunk[:bytes_to_serve]
+                        bytes_served += bytes_to_serve
+                        
+                    if bytes_served >= target_bytes:
+                        break
+        
+        return skip_stream()
     
     def file_exists(self, relative_path: str) -> bool:
         """Check if file exists on SMB server"""

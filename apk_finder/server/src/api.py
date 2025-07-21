@@ -14,6 +14,32 @@ from .scanner import scanner
 from .smb_client import smb_manager
 from shared.models import SearchRequest, SearchResponse, SystemStatus, DownloadRequest, FileInfo
 from shared.utils import calculate_md5
+import asyncio
+from functools import wraps
+
+
+def retry_on_failure(max_retries: int = 3, delay: float = 1.0):
+    """Decorator to retry failed operations"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs) if asyncio.iscoroutinefunction(func) else func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Attempt {attempt + 1} failed for {func.__name__}: {e}, retrying in {delay}s...")
+                        if asyncio.iscoroutinefunction(func):
+                            await asyncio.sleep(delay)
+                        else:
+                            time.sleep(delay)
+                    else:
+                        logger.error(f"All {max_retries} attempts failed for {func.__name__}: {e}")
+            raise last_exception
+        return wrapper
+    return decorator
 
 
 # Initialize FastAPI app
@@ -138,8 +164,9 @@ async def refresh_scan(background_tasks: BackgroundTasks,
 
 
 @app.get("/api/download")
-async def download_file(path: str, server: str, filename: Optional[str] = None, token: str = Depends(verify_token)):
-    """Download APK file with streaming"""
+@retry_on_failure(max_retries=2, delay=0.5)
+async def download_file(request: Request, path: str, server: str, filename: Optional[str] = None, token: str = Depends(verify_token)):
+    """Download APK file with streaming and range support for Android compatibility"""
     try:
         # Validate server
         if server not in Config.FILE_SERVERS:
@@ -148,60 +175,221 @@ async def download_file(path: str, server: str, filename: Optional[str] = None, 
         # Get SMB client
         client = smb_manager.get_client(server)
         
-        # Check if file exists
+        # Check if file exists and get file info first
         if not client.file_exists(path):
             raise HTTPException(status_code=404, detail="File not found")
-
-        try:
-            # Try smbclient high-level API first (most stable)
-            file_stream, file_size = client.download_file_stream_smbclient(path)
-        except Exception as e:
-            logger.warning(f"smbclient method failed, trying low-level API: {e}")
+        
+        # Get file size using multiple methods (critical for Android progress display)
+        file_info = client.get_file_info(path)
+        if not file_info.get("exists", False):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        file_size = file_info.get("size", 0)
+        size_detection_method = "file_info"
+        
+        # If file size is 0 or invalid, try alternative methods
+        if file_size <= 0:
+            logger.warning(f"File size from file_info is {file_size} for {path}, trying alternative methods")
+            
+            # Method 1: Try smbclient stat
             try:
-                # Fallback to fixed low-level API
-                file_stream, file_size = client.download_file_stream(path)
-            except Exception as e2:
-                logger.warning(f"Normal download failed, trying simplified method: {e2}")
-                # Final fallback to simplified method
+                import smbclient
+                if hasattr(client, 'host') and hasattr(client, 'share'):
+                    # Configure smbclient
+                    smbclient.ClientConfig(
+                        username=client.username,
+                        password=client.password
+                    )
+                    
+                    file_path = path[1:] if path.startswith('\\') else path
+                    unc_path = f"\\\\{client.host}\\{client.share}\\{file_path}"
+                    
+                    stat_info = smbclient.stat(unc_path)
+                    if hasattr(stat_info, 'st_size') and stat_info.st_size > 0:
+                        file_size = stat_info.st_size
+                        size_detection_method = "smbclient_stat"
+                        logger.info(f"Got file size via smbclient.stat: {file_size}")
+                    
+            except Exception as e:
+                logger.warning(f"smbclient.stat failed: {e}")
+            
+            # Method 2: Try download stream methods
+            if file_size <= 0:
                 try:
-                    file_stream, file_size = client.download_file_stream_simple(path)
-                except Exception as e3:
-                    logger.error(f"All download methods failed: {e3}")
-                    raise HTTPException(status_code=500, detail=f"Download failed: {e3}")
+                    _, detected_size = client.download_file_stream_smbclient(path)
+                    if detected_size and detected_size > 0:
+                        file_size = detected_size
+                        size_detection_method = "download_stream_smbclient"
+                        logger.info(f"Got file size via download stream: {file_size}")
+                except Exception as e:
+                    logger.warning(f"Could not get file size from smbclient download: {e}")
+                    
+                    # Final fallback to low-level API
+                    try:
+                        _, detected_size = client.download_file_stream(path)
+                        if detected_size and detected_size > 0:
+                            file_size = detected_size
+                            size_detection_method = "download_stream_lowlevel"
+                            logger.info(f"Got file size via low-level download stream: {file_size}")
+                    except Exception as e2:
+                        logger.warning(f"Could not get file size from low-level download: {e2}")
+        
+        # Validate final file size
+        if file_size <= 0:
+            logger.error(f"Could not determine file size for {path}, will proceed without Content-Length")
+            file_size = None
+        else:
+            logger.info(f"Final file size for {path}: {file_size} bytes (method: {size_detection_method})")
+        
+        # Parse Range header for resumable downloads
+        range_header = request.headers.get('range')
+        start = 0
+        end = file_size - 1 if file_size and file_size > 0 else 0
+        status_code = 200
+        
+        if range_header and file_size and file_size > 0:
+            # Parse Range: bytes=start-end
+            try:
+                range_match = range_header.replace('bytes=', '')
+                if '-' in range_match:
+                    range_start, range_end = range_match.split('-', 1)
+                    if range_start:
+                        start = int(range_start)
+                    if range_end:
+                        end = int(range_end)
+                    else:
+                        end = file_size - 1
+                    
+                    # Validate range
+                    if start >= file_size or end >= file_size or start > end:
+                        raise HTTPException(
+                            status_code=416, 
+                            detail="Requested Range Not Satisfiable",
+                            headers={"Content-Range": f"bytes */{file_size}"}
+                        )
+                    
+                    status_code = 206
+                    logger.info(f"Range request: bytes {start}-{end}/{file_size}")
+                
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Invalid range header: {range_header}, error: {e}")
+                # Ignore invalid range, serve full file
+                range_header = None
+        
+        # Get file stream with range support
+        if range_header and status_code == 206:
+            try:
+                # Use range-capable download method
+                file_stream = client.download_file_range_stream(path, start, end)
+            except Exception as e:
+                logger.warning(f"Range download failed, falling back to full download: {e}")
+                # Fallback to normal download and skip to start position
+                file_stream = client.download_file_stream_with_skip(path, start, end)
+        else:
+            # Normal download without range
+            try:
+                # Try smbclient high-level API first (most stable)
+                file_stream, _ = client.download_file_stream_smbclient(path)
+            except Exception as e:
+                logger.warning(f"smbclient method failed, trying low-level API: {e}")
+                try:
+                    # Fallback to fixed low-level API
+                    file_stream, _ = client.download_file_stream(path)
+                except Exception as e2:
+                    logger.warning(f"Normal download failed, trying simplified method: {e2}")
+                    # Final fallback to simplified method
+                    try:
+                        file_stream, _ = client.download_file_stream_simple(path)
+                    except Exception as e3:
+                        logger.error(f"All download methods failed: {e3}")
+                        raise HTTPException(status_code=500, detail=f"Download failed: {e3}")
         
         # Use provided filename or extract from path
         if not filename:
             filename = os.path.basename(path)
         
-        # Set up headers - handle Chinese filenames properly
+        # Set up headers - handle Chinese filenames properly for Android
         import urllib.parse
         
-        # Try to encode filename as ASCII first
-        try:
-            filename.encode('ascii')
-            # ASCII safe, use simple format
-            content_disposition = f'attachment; filename="{filename}"'
-        except UnicodeEncodeError:
-            # Contains non-ASCII characters, use RFC 2231 encoding
-            encoded_filename = urllib.parse.quote(filename.encode('utf-8'))
-            content_disposition = f"attachment; filename*=UTF-8''{encoded_filename}"
+        # Clean filename - remove path separators and special chars that may cause issues
+        clean_filename = filename.replace('\\', '_').replace('/', '_').strip()
         
+        # For Android compatibility, try multiple filename encoding approaches
+        content_disposition_attempts = []
+        
+        try:
+            clean_filename.encode('ascii')
+            # ASCII safe, use simple format
+            content_disposition_attempts.append(f'attachment; filename="{clean_filename}"')
+        except UnicodeEncodeError:
+            # Non-ASCII characters - use multiple fallback methods for Android compatibility
+            
+            # Method 1: RFC 2231 encoding (preferred)
+            encoded_filename = urllib.parse.quote(clean_filename.encode('utf-8'))
+            content_disposition_attempts.append(f"attachment; filename*=UTF-8''{encoded_filename}")
+            
+            # Method 2: Simplified ASCII fallback
+            ascii_filename = clean_filename.encode('ascii', 'ignore').decode('ascii')
+            if ascii_filename:
+                content_disposition_attempts.append(f'attachment; filename="{ascii_filename}.apk"')
+            
+            # Method 3: Generic APK name as final fallback
+            content_disposition_attempts.append('attachment; filename="download.apk"')
+        
+        # Use the first attempt as primary
+        content_disposition = content_disposition_attempts[0]
+        
+        # Detect Android user agent for specific optimizations
+        user_agent = request.headers.get('user-agent', '').lower()
+        is_android = 'android' in user_agent
+        is_mobile = any(mobile in user_agent for mobile in ['mobile', 'android', 'iphone', 'ipad'])
+        
+        logger.info(f"Download request from: {user_agent}, is_android: {is_android}, is_mobile: {is_mobile}")
+        
+        # Base headers optimized for Android browsers
         headers = {
             'Content-Disposition': content_disposition,
-            'Content-Type': 'application/vnd.android.package-archive'
+            'Content-Type': 'application/vnd.android.package-archive',
+            'Accept-Ranges': 'bytes',
+            'Connection': 'keep-alive',
+            'Cache-Control': 'public, max-age=0, must-revalidate',
+            'Pragma': 'public',
+            'X-Content-Type-Options': 'nosniff'
         }
         
-        if file_size is not None:
-            headers['Content-Length'] = str(file_size)
+        # Android-specific optimizations
+        if is_android:
+            # Android browsers work better with these headers
+            headers.update({
+                'Content-Transfer-Encoding': 'binary',
+                'X-Download-Options': 'noopen',
+                'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges'
+            })
+        
+        # Set content length and range headers
+        if status_code == 206:
+            content_length = end - start + 1
+            headers['Content-Length'] = str(content_length)
+            headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
+            logger.info(f"Serving range: {start}-{end}, content-length: {content_length}")
+        else:
+            if file_size and file_size > 0:
+                headers['Content-Length'] = str(file_size)
+                logger.info(f"Serving full file, content-length: {file_size}")
+            else:
+                logger.warning(f"Serving file without Content-Length (size unknown)")
+                # For Android compatibility, try to set a reasonable content-type
+                headers['Transfer-Encoding'] = 'chunked'
         
         # Increment download count
         directory = path.split("\\")[1] if "\\" in path else ""
         redis_client.increment_download_count(server, directory, path)
         
-        logger.info(f"Starting streaming download: {path} -> {filename}")
+        logger.info(f"Starting streaming download: {path} -> {filename} (status: {status_code})")
         
         return StreamingResponse(
             file_stream,
+            status_code=status_code,
             headers=headers,
             media_type='application/vnd.android.package-archive'
         )
@@ -287,6 +475,80 @@ async def get_servers(token: str = Depends(verify_token)):
     except Exception as e:
         logger.error(f"Error getting servers: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/download/check")
+async def check_download_capability(path: str, server: str, token: str = Depends(verify_token)):
+    """Check if file can be downloaded and get download info"""
+    try:
+        # Validate server
+        if server not in Config.FILE_SERVERS:
+            raise HTTPException(status_code=404, detail="Server not found")
+        
+        # Get SMB client
+        client = smb_manager.get_client(server)
+        
+        # Check file existence and get info
+        if not client.file_exists(path):
+            return {
+                "code": 404,
+                "downloadable": False,
+                "error": "File not found"
+            }
+        
+        # Get file info
+        file_info = client.get_file_info(path)
+        
+        # Test download capability
+        download_methods = []
+        try:
+            # Test smbclient
+            _, size = client.download_file_stream_smbclient(path)
+            download_methods.append({
+                "method": "smbclient", 
+                "available": True, 
+                "can_get_size": size is not None,
+                "size": size
+            })
+        except Exception as e:
+            download_methods.append({
+                "method": "smbclient", 
+                "available": False, 
+                "error": str(e)
+            })
+        
+        try:
+            # Test low-level API
+            _, size = client.download_file_stream(path)
+            download_methods.append({
+                "method": "low_level", 
+                "available": True, 
+                "can_get_size": size is not None,
+                "size": size
+            })
+        except Exception as e:
+            download_methods.append({
+                "method": "low_level", 
+                "available": False, 
+                "error": str(e)
+            })
+        
+        return {
+            "code": 200,
+            "downloadable": True,
+            "file_info": file_info,
+            "download_methods": download_methods,
+            "supports_range": True,  # We always support range through our implementation
+            "recommended_chunk_size": 65536  # 64KB
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking download capability: {e}")
+        return {
+            "code": 500,
+            "downloadable": False,
+            "error": str(e)
+        }
 
 
 @app.get("/health")
