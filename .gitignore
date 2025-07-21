@@ -6,3 +6,9 @@ CLAUDE.md
 apk_finder/*/__pycache__/
 test_*.py
 apk_finder/server/tmp/
+apk_finder/client/build/
+
+apk_finder/client/dist/
+apk_finder/client/dist/
+apk_finder/kivy_client/.buildozer/
+

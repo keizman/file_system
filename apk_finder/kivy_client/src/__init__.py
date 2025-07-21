@@ -1,1 +1,0 @@
-# Kivy Client Package

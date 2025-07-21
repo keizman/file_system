@@ -280,10 +280,7 @@ pip install pyinstaller
 
 # Build executable
 cd client
-pyinstaller --onefile --windowed \
-  --name "APK Finder" \
-  --icon resources/icon.ico \
-  main.py
+pyinstaller --onefile --windowed   --name "File_system"   --icon resources/images.ico   main.py
 
 # Output in dist/
 ```

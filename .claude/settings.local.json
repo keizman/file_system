@@ -13,7 +13,13 @@
       "Bash(ss:*)",
       "Bash(SERVER_PORT=9302 python main.py)",
       "Bash(curl:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(pyinstaller:*)",
+      "Bash(find:*)",
+      "Bash(true)",
+      "Bash(cd:*)",
+      "Bash(conda remove:*)",
+      "Bash(apt-get:*)"
     ],
     "deny": []
   }
