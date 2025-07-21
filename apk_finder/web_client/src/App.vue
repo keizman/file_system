@@ -10,8 +10,8 @@
               <span v-if="isRefreshing">Refreshing...</span>
               <span v-else>🔄 Refresh</span>
             </button>
-            <button @click="toggleTheme" class="btn btn-outline">
-              {{ isDarkMode ? '☀️' : '🌙' }}
+            <button @click="showSettings" class="btn btn-outline">
+              ⚙️ Settings
             </button>
           </div>
         </div>
@@ -276,6 +276,13 @@
         {{ toast.message }}
       </div>
     </div>
+
+    <!-- Settings Dialog -->
+    <SettingsDialog 
+      :is-visible="isSettingsVisible" 
+      @close="closeSettings"
+      @settings-updated="onSettingsUpdated"
+    />
   </div>
 </template>
 
@@ -283,12 +290,17 @@
 import { ref, reactive, onMounted, watch } from 'vue'
 import { useApiClient } from './composables/useApiClient'
 import { formatFileSize, formatDateTime } from './utils/formatters'
+import SettingsDialog from './components/SettingsDialog.vue'
+import config from './config.js'
 
 export default {
   name: 'App',
+  components: {
+    SettingsDialog
+  },
   setup() {
     // Reactive state
-    const isDarkMode = ref(false)
+    const isDarkMode = ref(config.THEME === 'dark')
     const searchKeyword = ref('')
     const selectedServer = ref('')
     const buildType = ref('release')
@@ -297,6 +309,7 @@ export default {
     const isRefreshing = ref(false)
     const isDownloading = reactive({})
     const currentDownload = ref(null)
+    const isSettingsVisible = ref(false)
     
     // Data
     const servers = ref([])
@@ -333,7 +346,7 @@ export default {
           keyword: searchKeyword.value,
           server: selectedServer.value || null,
           build_type: buildType.value,
-          limit: 50,
+          limit: config.MAX_SEARCH_RESULTS,
           offset: 0
         })
         
@@ -447,9 +460,26 @@ export default {
       recentDownloads.value = []
     }
     
-    const toggleTheme = () => {
-      isDarkMode.value = !isDarkMode.value
-      // Theme switching logic can be implemented here
+    const showSettings = () => {
+      isSettingsVisible.value = true
+    }
+    
+    const closeSettings = () => {
+      isSettingsVisible.value = false
+    }
+    
+    const onSettingsUpdated = (newSettings) => {
+      // Update theme if changed
+      if (newSettings.theme !== config.THEME) {
+        isDarkMode.value = newSettings.theme === 'dark'
+        // Apply theme changes to UI
+        document.documentElement.setAttribute('data-theme', newSettings.theme)
+      }
+      
+      showToast('Settings saved successfully', 'success')
+      
+      // Reload API clients with new configuration
+      // Note: This may require page refresh for full effect in some cases
     }
     
     const checkConnection = async () => {
@@ -512,6 +542,7 @@ export default {
       isRefreshing,
       isDownloading,
       currentDownload,
+      isSettingsVisible,
       
       // Data
       servers,
@@ -531,7 +562,9 @@ export default {
       refreshScan: refreshScanAction,
       copyToClipboard,
       clearRecentDownloads,
-      toggleTheme,
+      showSettings,
+      closeSettings,
+      onSettingsUpdated,
       showToast,
       getBuildTypeClass,
       

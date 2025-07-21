@@ -1,21 +1,22 @@
 import axios from 'axios'
+import config from '../config.js'
 
-const API_BASE_URL = '/api'
-const API_TOKEN = 'cs' // Same as client config
-
-// Create axios instance with default config
-const apiClient = axios.create({
-  baseURL: API_BASE_URL,
-  headers: {
-    'Authorization': `Bearer ${API_TOKEN}`,
-    'Content-Type': 'application/json'
-  },
-  timeout: 30000
-})
+// Create axios instance with dynamic config
+const createApiClient = () => {
+  return axios.create({
+    baseURL: '/api',
+    headers: {
+      'Authorization': `Bearer ${config.API_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    timeout: 30000
+  })
+}
 
 export function useApiClient() {
   const searchApkFiles = async ({ keyword = '', server = null, build_type = 'release', limit = 10, offset = 0 }) => {
     try {
+      const apiClient = createApiClient()
       const response = await apiClient.post('/search', {
         keyword,
         server,
@@ -33,6 +34,7 @@ export function useApiClient() {
 
   const refreshScan = async (server = null) => {
     try {
+      const apiClient = createApiClient()
       const params = server ? { server } : {}
       const response = await apiClient.post('/refresh', null, { params })
       return response.status === 200
@@ -44,6 +46,7 @@ export function useApiClient() {
 
   const downloadFile = async (path, server, onProgress = null) => {
     try {
+      const apiClient = createApiClient()
       const params = { path, server }
       
       const response = await apiClient.get('/download', {
@@ -89,6 +92,7 @@ export function useApiClient() {
 
   const getServers = async () => {
     try {
+      const apiClient = createApiClient()
       const response = await apiClient.get('/servers')
       return response.data.data
     } catch (error) {
@@ -99,6 +103,7 @@ export function useApiClient() {
 
   const getSystemStatus = async () => {
     try {
+      const apiClient = createApiClient()
       const response = await apiClient.get('/status')
       return response.data
     } catch (error) {
