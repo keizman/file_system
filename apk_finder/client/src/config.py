@@ -13,7 +13,7 @@ except ImportError:
 
 class ClientConfig:
     # Server Configuration
-    SERVER_URL = os.getenv("SERVER_URL", "http://localhost:9301")
+    SERVER_URL = os.getenv("SERVER_URL", "http://192.168.1.118:9301")
     API_TOKEN = os.getenv("API_TOKEN", "cs")
     
     # Client Configuration

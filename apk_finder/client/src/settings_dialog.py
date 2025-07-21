@@ -99,6 +99,7 @@ class SettingsDialog(QDialog):
         
         self.server_url = QLineEdit()
         self.server_url.setPlaceholderText("http://localhost:9301")
+        
         server_layout.addRow("Server URL:", self.server_url)
         
         self.api_token = QLineEdit()

@@ -151,17 +151,43 @@ async def download_file(path: str, server: str, filename: Optional[str] = None, 
         # Check if file exists
         if not client.file_exists(path):
             raise HTTPException(status_code=404, detail="File not found")
-        
-        # Get file stream and size
-        file_stream, file_size = client.download_file_stream(path)
+
+        try:
+            # Try smbclient high-level API first (most stable)
+            file_stream, file_size = client.download_file_stream_smbclient(path)
+        except Exception as e:
+            logger.warning(f"smbclient method failed, trying low-level API: {e}")
+            try:
+                # Fallback to fixed low-level API
+                file_stream, file_size = client.download_file_stream(path)
+            except Exception as e2:
+                logger.warning(f"Normal download failed, trying simplified method: {e2}")
+                # Final fallback to simplified method
+                try:
+                    file_stream, file_size = client.download_file_stream_simple(path)
+                except Exception as e3:
+                    logger.error(f"All download methods failed: {e3}")
+                    raise HTTPException(status_code=500, detail=f"Download failed: {e3}")
         
         # Use provided filename or extract from path
         if not filename:
             filename = os.path.basename(path)
         
-        # Set up headers
+        # Set up headers - handle Chinese filenames properly
+        import urllib.parse
+        
+        # Try to encode filename as ASCII first
+        try:
+            filename.encode('ascii')
+            # ASCII safe, use simple format
+            content_disposition = f'attachment; filename="{filename}"'
+        except UnicodeEncodeError:
+            # Contains non-ASCII characters, use RFC 2231 encoding
+            encoded_filename = urllib.parse.quote(filename.encode('utf-8'))
+            content_disposition = f"attachment; filename*=UTF-8''{encoded_filename}"
+        
         headers = {
-            'Content-Disposition': f'attachment; filename="{filename}"',
+            'Content-Disposition': content_disposition,
             'Content-Type': 'application/vnd.android.package-archive'
         }
         

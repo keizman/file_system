@@ -498,9 +498,22 @@ class SMBClient:
             
             # Get file size to prevent reading past end
             try:
-                # Try to get file information using query_info method
-                file_info = file_open.query_info()
-                file_size = file_info.end_of_file
+                # Use the correct smbprotocol API to get file information
+                from smbprotocol.file_info import FileInformationClass
+                file_info = file_open.query_info(
+                    info_type=1,  # FileInfoType.SMB2_0_INFO_FILE
+                    file_info_class=FileInformationClass.FILE_STANDARD_INFORMATION,
+                    output_buffer_length=4096
+                )
+                # Parse the file standard information to get file size
+                if file_info and len(file_info) >= 24:  # FILE_STANDARD_INFORMATION is 24 bytes
+                    import struct
+                    # Bytes 16-24 contain the EndOfFile (file size)
+                    file_size = struct.unpack('<Q', file_info[16:24])[0]
+                    logger.debug(f"Got file size using query_info: {file_size}")
+                else:
+                    file_size = None
+                    logger.debug("Could not get file size using query_info")
             except (AttributeError, Exception) as e:
                 logger.debug(f"Could not get file size using query_info: {e}")
                 # Fallback: try to read file size from initial read
@@ -573,6 +586,132 @@ class SMBClient:
             
         except Exception as e:
             logger.error(f"Error streaming file {relative_path}: {e}")
+            raise
+    
+    def download_file_stream_simple(self, path: str):
+        """
+        简化版文件下载流，跳过文件大小获取以避免SMB协议兼容性问题
+        
+        Args:
+            path: 文件路径
+            
+        Returns:
+            tuple: (file_stream_generator, None) - 文件大小始终为None
+        """
+        logger.info(f"Starting simplified file stream download: {path}")
+        
+        if not self.tree:
+            logger.error("Not connected to SMB server")
+            raise Exception("Not connected to SMB server")
+        
+        # Normalize path
+        if path.startswith('\\'):
+            path = path[1:]
+        normalized_path = path.replace('/', '\\')
+        
+        logger.debug(f"Downloading file from normalized path: {normalized_path}")
+        
+        # Open file for reading
+        file_open = Open(self.tree, normalized_path)
+        try:
+            file_open.create(
+                ImpersonationLevel.Impersonation,
+                FileAttributes.FILE_ATTRIBUTE_NORMAL | FileAttributes.FILE_ATTRIBUTE_ARCHIVE,
+                ShareAccess.FILE_SHARE_READ,
+                CreateDisposition.FILE_OPEN,
+                CreateOptions.FILE_NON_DIRECTORY_FILE
+            )
+            
+            logger.debug("File opened successfully - creating stream generator")
+            
+            def file_stream():
+                offset = 0
+                chunk_size = 64 * 1024  # 64KB chunks to avoid credit issues
+                
+                try:
+                    while True:
+                        try:
+                            data = file_open.read(offset, chunk_size)
+                            if not data:
+                                logger.debug(f"Reached end of file at offset {offset}")
+                                break
+                            
+                            logger.debug(f"Read {len(data)} bytes at offset {offset}")
+                            yield data
+                            offset += len(data)
+                            
+                        except Exception as e:
+                            logger.error(f"Error reading file at offset {offset}: {e}")
+                            break
+                            
+                finally:
+                    logger.debug("Closing file handle")
+                    file_open.close()
+            
+            return file_stream(), None  # Always return None for file size
+            
+        except Exception as e:
+            logger.error(f"Error opening file {normalized_path}: {e}")
+            try:
+                file_open.close()
+            except:
+                pass
+            raise
+    
+    def download_file_stream_smbclient(self, path: str):
+        """
+        使用smbclient高级API下载文件，更稳定可靠
+        
+        Args:
+            path: 文件路径
+            
+        Returns:
+            tuple: (file_stream_generator, file_size)
+        """
+        logger.info(f"Starting smbclient download: {path}")
+        
+        # Construct full UNC path
+        if path.startswith('\\'):
+            path = path[1:]
+        unc_path = f"\\\\{self.host}\\{self.share}\\{path}"
+        
+        try:
+            import smbclient
+            
+            # Configure credentials if not already done
+            smbclient.ClientConfig(
+                username=self.username,
+                password=self.password
+            )
+            
+            # Get file size first
+            try:
+                file_size = smbclient.stat(unc_path).st_size
+                logger.debug(f"Got file size using smbclient.stat: {file_size}")
+            except Exception as e:
+                logger.warning(f"Could not get file size: {e}")
+                file_size = None
+            
+            def file_stream():
+                try:
+                    with smbclient.open_file(unc_path, mode='rb', buffering=0) as f:
+                        chunk_size = 64 * 1024  # 64KB chunks
+                        while True:
+                            data = f.read(chunk_size)
+                            if not data:
+                                break
+                            yield data
+                except Exception as e:
+                    logger.error(f"Error reading file with smbclient: {e}")
+                    raise
+            
+            return file_stream(), file_size
+            
+        except ImportError:
+            logger.error("smbclient high-level API not available, falling back to low-level API")
+            return self.download_file_stream_simple(path)
+        except Exception as e:
+            logger.error(f"smbclient download failed: {e}")
             raise
     
     def file_exists(self, relative_path: str) -> bool:
