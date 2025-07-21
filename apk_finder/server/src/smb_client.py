@@ -407,9 +407,22 @@ class SMBClient:
             
             # Get file size to prevent reading past end
             try:
-                # Try to get file information using query_info method
-                file_info = file_open.query_info()
-                file_size = file_info.end_of_file
+                # Use the correct smbprotocol API to get file information
+                from smbprotocol.file_info import FileInformationClass
+                file_info_data = file_open.query_info(
+                    info_type=1,  # FileInfoType.SMB2_0_INFO_FILE
+                    file_info_class=FileInformationClass.FILE_STANDARD_INFORMATION,
+                    output_buffer_length=4096
+                )
+                # Parse the file standard information to get file size
+                if file_info_data and len(file_info_data) >= 24:  # FILE_STANDARD_INFORMATION is 24 bytes
+                    import struct
+                    # Bytes 16-24 contain the EndOfFile (file size)
+                    file_size = struct.unpack('<Q', file_info_data[16:24])[0]
+                    logger.debug(f"Got file size using query_info: {file_size}")
+                else:
+                    file_size = None
+                    logger.debug("Could not get file size using query_info")
             except (AttributeError, Exception) as e:
                 logger.debug(f"Could not get file size using query_info: {e}")
                 # Fallback: try to read file size from initial read
@@ -935,15 +948,78 @@ class SMBClient:
                 impersonation_level=ImpersonationLevel.Impersonation
             )
             
-            # Get file information
-            info = file_open.query_info()
-            
-            file_info = {
-                "size": info.end_of_file,
-                "created_time": datetime.fromtimestamp(info.creation_time.timestamp()),
-                "modified_time": datetime.fromtimestamp(info.last_write_time.timestamp()),
-                "exists": True
-            }
+            # Get file information using correct smbprotocol API
+            try:
+                from smbprotocol.file_info import FileInformationClass
+                file_info_data = file_open.query_info(
+                    info_type=1,  # FileInfoType.SMB2_0_INFO_FILE
+                    file_info_class=FileInformationClass.FILE_STANDARD_INFORMATION,
+                    output_buffer_length=4096
+                )
+                
+                if file_info_data and len(file_info_data) >= 24:
+                    import struct
+                    # Parse FILE_STANDARD_INFORMATION structure
+                    # Bytes 16-24: EndOfFile (file size)
+                    file_size = struct.unpack('<Q', file_info_data[16:24])[0]
+                    
+                    # For timestamps, we need a different query
+                    try:
+                        basic_info_data = file_open.query_info(
+                            info_type=1,
+                            file_info_class=FileInformationClass.FILE_BASIC_INFORMATION,
+                            output_buffer_length=4096
+                        )
+                        if basic_info_data and len(basic_info_data) >= 40:
+                            # Parse FILE_BASIC_INFORMATION structure
+                            creation_time = struct.unpack('<Q', basic_info_data[0:8])[0]
+                            last_write_time = struct.unpack('<Q', basic_info_data[24:32])[0]
+                            
+                            # Convert Windows FILETIME to Unix timestamp
+                            # FILETIME is 100-nanosecond intervals since January 1, 1601
+                            unix_epoch_delta = 116444736000000000  # 100-ns intervals between 1601 and 1970
+                            creation_timestamp = (creation_time - unix_epoch_delta) / 10000000
+                            modified_timestamp = (last_write_time - unix_epoch_delta) / 10000000
+                            
+                            file_info = {
+                                "size": file_size,
+                                "created_time": datetime.fromtimestamp(creation_timestamp),
+                                "modified_time": datetime.fromtimestamp(modified_timestamp),
+                                "exists": True
+                            }
+                        else:
+                            # Fallback without timestamps
+                            file_info = {
+                                "size": file_size,
+                                "created_time": datetime.now(),
+                                "modified_time": datetime.now(),
+                                "exists": True
+                            }
+                    except Exception:
+                        # Fallback without timestamps
+                        file_info = {
+                            "size": file_size,
+                            "created_time": datetime.now(),
+                            "modified_time": datetime.now(),
+                            "exists": True
+                        }
+                else:
+                    # Fallback: file exists but can't get detailed info
+                    file_info = {
+                        "size": 0,
+                        "created_time": datetime.now(),
+                        "modified_time": datetime.now(),
+                        "exists": True
+                    }
+            except Exception as e:
+                logger.warning(f"Could not get detailed file info, using fallback: {e}")
+                # Fallback: file exists but can't get detailed info
+                file_info = {
+                    "size": 0,
+                    "created_time": datetime.now(),
+                    "modified_time": datetime.now(),
+                    "exists": True
+                }
             
             file_open.close()
             return file_info
