@@ -724,67 +724,17 @@ class SMBClient:
                 file_size = None
             
             def file_stream():
-                max_retries = 3
-                retry_delay = 1  # seconds
-                
-                for attempt in range(max_retries):
-                    try:
-                        # Try with different sharing and buffering options
-                        share_options = [
-                            {'mode': 'rb', 'buffering': -1},  # Default buffering
-                            {'mode': 'rb', 'buffering': 0},   # No buffering
-                            {'mode': 'rb', 'buffering': 8192} # 8KB buffer
-                        ]
-                        
-                        file_opened = False
-                        f = None
-                        
-                        for share_opt in share_options:
-                            try:
-                                f = smbclient.open_file(unc_path, **share_opt)
-                                file_opened = True
-                                logger.debug(f"Opened file with options: {share_opt}")
+                try:
+                    with smbclient.open_file(unc_path, mode='rb', buffering=0) as f:
+                        chunk_size = 64 * 1024  # 64KB chunks
+                        while True:
+                            data = f.read(chunk_size)
+                            if not data:
                                 break
-                            except Exception as open_error:
-                                if "being used by another process" in str(open_error):
-                                    logger.debug(f"File sharing conflict with options {share_opt}: {open_error}")
-                                    continue
-                                else:
-                                    raise open_error
-                        
-                        if not file_opened:
-                            raise Exception(f"Could not open file with any sharing options after attempt {attempt + 1}")
-                        
-                        try:
-                            chunk_size = 64 * 1024  # 64KB chunks
-                            while True:
-                                data = f.read(chunk_size)
-                                if not data:
-                                    break
-                                yield data
-                        finally:
-                            if f:
-                                f.close()
-                        
-                        # If we get here, the download succeeded
-                        break
-                        
-                    except Exception as e:
-                        if f:
-                            try:
-                                f.close()
-                            except:
-                                pass
-                        
-                        logger.warning(f"Attempt {attempt + 1} failed: {e}")
-                        
-                        if attempt < max_retries - 1:
-                            import time
-                            time.sleep(retry_delay)
-                            retry_delay *= 2  # Exponential backoff
-                        else:
-                            logger.error(f"All {max_retries} attempts failed for smbclient download")
-                            raise
+                            yield data
+                except Exception as e:
+                    logger.error(f"Error reading file with smbclient: {e}")
+                    raise
             
             return file_stream(), file_size
             
@@ -825,74 +775,25 @@ class SMBClient:
             unc_path = f"\\\\{self.host}\\{self.share}\\{path}"
             
             def range_stream():
-                max_retries = 3
-                retry_delay = 1
-                
-                for attempt in range(max_retries):
-                    try:
-                        # Try with different sharing and buffering options
-                        share_options = [
-                            {'mode': 'rb', 'buffering': -1},  # Default buffering
-                            {'mode': 'rb', 'buffering': 0},   # No buffering
-                            {'mode': 'rb', 'buffering': 8192} # 8KB buffer
-                        ]
+                try:
+                    with smbclient.open_file(unc_path, mode='rb', buffering=0) as f:
+                        # Seek to start position
+                        f.seek(start)
                         
-                        file_opened = False
-                        f = None
+                        remaining = end - start + 1
+                        chunk_size = min(64 * 1024, remaining)  # 64KB chunks or remaining bytes
                         
-                        for share_opt in share_options:
-                            try:
-                                f = smbclient.open_file(unc_path, **share_opt)
-                                file_opened = True
-                                logger.debug(f"Opened file for range download with options: {share_opt}")
+                        while remaining > 0:
+                            bytes_to_read = min(chunk_size, remaining)
+                            data = f.read(bytes_to_read)
+                            if not data:
                                 break
-                            except Exception as open_error:
-                                if "being used by another process" in str(open_error):
-                                    logger.debug(f"File sharing conflict in range download with options {share_opt}: {open_error}")
-                                    continue
-                                else:
-                                    raise open_error
-                        
-                        if not file_opened:
-                            raise Exception(f"Could not open file for range download with any sharing options after attempt {attempt + 1}")
-                        
-                        try:
-                            # Seek to start position
-                            f.seek(start)
+                            yield data
+                            remaining -= len(data)
                             
-                            remaining = end - start + 1
-                            chunk_size = min(64 * 1024, remaining)  # 64KB chunks or remaining bytes
-                            
-                            while remaining > 0:
-                                bytes_to_read = min(chunk_size, remaining)
-                                data = f.read(bytes_to_read)
-                                if not data:
-                                    break
-                                yield data
-                                remaining -= len(data)
-                        finally:
-                            if f:
-                                f.close()
-                        
-                        # If we get here, the download succeeded
-                        break
-                        
-                    except Exception as e:
-                        if f:
-                            try:
-                                f.close()
-                            except:
-                                pass
-                        
-                        logger.warning(f"Range download attempt {attempt + 1} failed: {e}")
-                        
-                        if attempt < max_retries - 1:
-                            import time
-                            time.sleep(retry_delay)
-                            retry_delay *= 2  # Exponential backoff
-                        else:
-                            logger.error(f"All {max_retries} attempts failed for range download")
-                            raise
+                except Exception as e:
+                    logger.error(f"Error reading range with smbclient: {e}")
+                    raise
             
             return range_stream()
             
