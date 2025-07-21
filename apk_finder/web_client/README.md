@@ -32,6 +32,25 @@ This web client preserves the original PyQt5 layout structure:
 - ✅ **Same API endpoints** and authentication
 - ✅ **Responsive design** for mobile/tablet support
 - ✅ **Modern web UI** with Tailwind CSS styling
+- ✅ **Enhanced clipboard support** with fallbacks for older browsers
+
+## Known Issues & Solutions
+
+### Chinese Characters in File Paths
+**Issue**: Files with Chinese characters in paths may fail to download due to server-side encoding issues.
+
+**Solution**: 
+1. Use the **📋 SMB Path** or **🔗 HTTP Path** copy buttons
+2. Download manually through file explorer or direct HTTP access
+3. The web client provides helpful error messages and fallback options
+
+### Clipboard Access
+**Issue**: Some browsers may block clipboard access due to security policies.
+
+**Solution**: The web client includes automatic fallback mechanisms:
+- Primary: `navigator.clipboard.writeText()` (modern browsers)
+- Fallback: `document.execCommand('copy')` (older browsers)
+- Manual: Error messages show the path for manual copying
 
 ## Development Setup
 

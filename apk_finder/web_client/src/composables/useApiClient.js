@@ -47,6 +47,7 @@ export function useApiClient() {
   const downloadFile = async (path, server, onProgress = null) => {
     try {
       const apiClient = createApiClient()
+      
       const params = { path, server }
       
       const response = await apiClient.get('/download', {
@@ -61,20 +62,39 @@ export function useApiClient() {
         }
       })
 
+      // Check if response is successful
+      if (response.status !== 200) {
+        throw new Error(`Download failed with status: ${response.status}`)
+      }
+
+      // Check if response is actually a blob (file content)
+      if (response.data.type === 'application/json') {
+        // If server returned JSON error instead of file
+        const text = await response.data.text()
+        const errorData = JSON.parse(text)
+        throw new Error(errorData.detail || 'Download failed')
+      }
+
       // Create download link
       const url = window.URL.createObjectURL(new Blob([response.data]))
       const link = document.createElement('a')
       link.href = url
       
-      // Try to get filename from response headers or use path
-      const contentDisposition = response.headers['content-disposition']
-      let filename = path.split('/').pop() || path.split('\\').pop() || 'download'
+      // Extract filename from path
+      let filename = path.split('/').pop() || path.split('\\').pop() || 'download.apk'
       
+      // Try to get filename from response headers
+      const contentDisposition = response.headers['content-disposition']
       if (contentDisposition) {
         const matches = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(contentDisposition)
         if (matches != null && matches[1]) {
           filename = matches[1].replace(/['"]/g, '')
         }
+      }
+      
+      // Ensure .apk extension
+      if (!filename.toLowerCase().endsWith('.apk')) {
+        filename += '.apk'
       }
       
       link.setAttribute('download', filename)
@@ -86,7 +106,21 @@ export function useApiClient() {
       return true
     } catch (error) {
       console.error('Download API error:', error)
-      throw new Error(error.response?.data?.message || 'Download failed')
+      
+      // Provide more detailed error messages
+      if (error.response) {
+        if (error.response.status === 500) {
+          throw new Error('Server error - possibly due to file path encoding issues')
+        } else if (error.response.status === 404) {
+          throw new Error('File not found on server')
+        } else {
+          throw new Error(`Download failed: ${error.response.status} ${error.response.statusText}`)
+        }
+      } else if (error.request) {
+        throw new Error('Network error - unable to reach server')
+      } else {
+        throw new Error(error.message || 'Download failed')
+      }
     }
   }
 

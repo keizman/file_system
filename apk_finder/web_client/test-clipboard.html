@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clipboard Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }
+        button { padding: 10px 15px; margin: 5px; cursor: pointer; }
+        #result { margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>Clipboard API Test</h1>
+    
+    <div class="test-section">
+        <h3>Test SMB Path Copy</h3>
+        <button onclick="testSMBCopy()">Copy SMB Path</button>
+        <button onclick="testHTTPCopy()">Copy HTTP Path</button>
+        <button onclick="readClipboard()">Read Clipboard</button>
+        <div id="result"></div>
+    </div>
+
+    <script>
+        const testFile = {
+            server_prefix: '\\\\192.168.1.100\\shared',
+            relative_path: '\\桌面-V11 Cast桌面\\3.6.0\\release\\uv11CastLauncher_3.6.0_768ebb1b_20250717_45_release.apk',
+            file_name: 'uv11CastLauncher_3.6.0_768ebb1b_20250717_45_release.apk'
+        };
+
+        async function copyToClipboard(text, type) {
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                    document.getElementById('result').innerHTML = `✅ ${type} path copied: ${text}`;
+                } else {
+                    // Fallback
+                    const textArea = document.createElement('textarea');
+                    textArea.value = text;
+                    document.body.appendChild(textArea);
+                    textArea.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(textArea);
+                    document.getElementById('result').innerHTML = `✅ ${type} path copied (fallback): ${text}`;
+                }
+            } catch (error) {
+                document.getElementById('result').innerHTML = `❌ Failed to copy: ${error.message}`;
+            }
+        }
+
+        function testSMBCopy() {
+            const path = `${testFile.server_prefix}${testFile.relative_path}`;
+            copyToClipboard(path, 'SMB');
+        }
+
+        function testHTTPCopy() {
+            const serverPrefix = testFile.server_prefix;
+            if (serverPrefix.startsWith('\\\\')) {
+                const parts = serverPrefix.split('\\');
+                if (parts.length >= 4) {
+                    const serverIp = parts[2];
+                    const sharePath = parts.slice(3).join('/');
+                    const path = `http://${serverIp}/${sharePath}${testFile.relative_path.replace(/\\/g, '/')}`;
+                    copyToClipboard(path, 'HTTP');
+                }
+            }
+        }
+
+        async function readClipboard() {
+            try {
+                if (navigator.clipboard && navigator.clipboard.readText) {
+                    const text = await navigator.clipboard.readText();
+                    document.getElementById('result').innerHTML = `📋 Clipboard content: ${text}`;
+                } else {
+                    document.getElementById('result').innerHTML = `❌ Cannot read clipboard (not supported or no permission)`;
+                }
+            } catch (error) {
+                document.getElementById('result').innerHTML = `❌ Failed to read clipboard: ${error.message}`;
+            }
+        }
+    </script>
+</body>
+</html>

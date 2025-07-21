@@ -80,7 +80,7 @@
           />
           <button @click="searchFiles" :disabled="isSearching" class="btn btn-primary">
             <span v-if="isSearching">Searching...</span>
-            <span v-else">🔍 Search</span>
+            <span v-else>🔍 Search</span>
           </button>
         </div>
       </div>
@@ -142,16 +142,24 @@
                           @click.stop="downloadFile(file)"
                           :disabled="isDownloading[file.relative_path]"
                           class="text-primary hover:text-primary-hover"
+                          title="Download File"
                         >
                           <span v-if="isDownloading[file.relative_path]">⏳</span>
                           <span v-else>📥</span>
                         </button>
                         <button 
                           @click.stop="copyToClipboard(file, 'smb')"
-                          class="text-gray-600 hover:text-gray-800"
+                          class="text-blue-600 hover:text-blue-800"
                           title="Copy SMB Path"
                         >
                           📋
+                        </button>
+                        <button 
+                          @click.stop="copyToClipboard(file, 'http')"
+                          class="text-green-600 hover:text-green-800"
+                          title="Copy HTTP Path"
+                        >
+                          🔗
                         </button>
                       </div>
                     </td>
@@ -377,6 +385,7 @@ export default {
         // Find server name from file data
         const serverName = findServerNameFromPrefix(file.server_prefix)
         
+        // Try to download the file
         await downloadFile(file.relative_path, serverName, (progress) => {
           if (currentDownload.value) {
             currentDownload.value.progress = progress
@@ -388,7 +397,12 @@ export default {
         showToast('Download completed successfully', 'success')
         
       } catch (error) {
-        showToast('Download failed: ' + error.message, 'error')
+        console.error('Download failed:', error)
+        if (error.message.includes('encoding issues')) {
+          showToast('Download failed due to Chinese characters in path. Try copying SMB path and downloading manually.', 'error')
+        } else {
+          showToast('Download failed: ' + error.message, 'error')
+        }
       } finally {
         isDownloading[file.relative_path] = false
         currentDownload.value = null
@@ -433,10 +447,22 @@ export default {
       }
       
       try {
-        await navigator.clipboard.writeText(path)
-        showToast(`${type.toUpperCase()} path copied to clipboard`, 'success')
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(path)
+          showToast(`${type.toUpperCase()} path copied to clipboard`, 'success')
+        } else {
+          // Fallback for older browsers
+          const textArea = document.createElement('textarea')
+          textArea.value = path
+          document.body.appendChild(textArea)
+          textArea.select()
+          document.execCommand('copy')
+          document.body.removeChild(textArea)
+          showToast(`${type.toUpperCase()} path copied to clipboard`, 'success')
+        }
       } catch (error) {
-        showToast('Failed to copy to clipboard', 'error')
+        console.error('Copy to clipboard failed:', error)
+        showToast('Failed to copy to clipboard. Path: ' + path, 'error')
       }
     }
     
