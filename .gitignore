@@ -12,3 +12,4 @@ apk_finder/client/dist/
 apk_finder/client/dist/
 apk_finder/kivy_client/.buildozer/
 
+apk_finder/web_client/node_modules/

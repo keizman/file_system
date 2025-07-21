@@ -1,0 +1,24 @@
+{
+  "name": "apk-finder-web-client",
+  "version": "1.0.0",
+  "description": "Web client for APK Finder application",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "serve": "vite preview --port 3000"
+  },
+  "dependencies": {
+    "vue": "^3.3.4",
+    "axios": "^1.5.0",
+    "@vueuse/core": "^10.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^4.4.0",
+    "vite": "^4.4.9",
+    "tailwindcss": "^3.3.3",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.31"
+  }
+}
