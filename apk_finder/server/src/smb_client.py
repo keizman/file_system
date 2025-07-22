@@ -714,14 +714,6 @@ class SMBClient:
                 password=self.password
             )
             
-            # Get file size first
-            try:
-                file_size = smbclient.stat(unc_path).st_size
-                logger.debug(f"Got file size using smbclient.stat: {file_size}")
-            except Exception as e:
-                logger.warning(f"Could not get file size: {e}")
-                file_size = None
-            
             def file_stream():
                 try:
                     with smbclient.open_file(unc_path, mode='rb', buffering=0) as f:
@@ -734,6 +726,10 @@ class SMBClient:
                 except Exception as e:
                     logger.error(f"Error reading file with smbclient: {e}")
                     raise
+            
+            # Don't call stat here to avoid file locking issues
+            # File size will be determined by API layer using separate stat call
+            file_size = None
             
             return file_stream(), file_size
             
