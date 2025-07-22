@@ -383,8 +383,19 @@ async def download_file(request: Request, path: str, server: str, filename: Opti
         
         logger.info(f"Starting streaming download: {path} -> {filename} (status: {status_code})")
         
+        # Wrap file stream with error handling to prevent server crashes
+        def safe_file_stream():
+            try:
+                yield from file_stream
+                logger.info(f"Completed streaming download: {path}")
+            except Exception as stream_error:
+                logger.error(f"Stream error during download of {path}: {stream_error}")
+                # Don't re-raise here as it would crash the connection
+                # The client will detect the incomplete download
+                return
+        
         return StreamingResponse(
-            file_stream,
+            safe_file_stream(),
             status_code=status_code,
             headers=headers,
             media_type='application/vnd.android.package-archive'

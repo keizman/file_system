@@ -707,31 +707,87 @@ class SMBClient:
         
         try:
             import smbclient
+            import time
+            import random
+            from smbprotocol.exceptions import SMBOSError
             
-            # Configure credentials if not already done
+            # Configure credentials with connection settings for better reliability
             smbclient.ClientConfig(
                 username=self.username,
-                password=self.password
+                password=self.password,
+                connection_timeout=30,
+                auth_protocol="ntlm"
             )
             
-            def file_stream():
-                try:
-                    with smbclient.open_file(unc_path, mode='rb', buffering=0) as f:
-                        chunk_size = 64 * 1024  # 64KB chunks
-                        while True:
-                            data = f.read(chunk_size)
-                            if not data:
-                                break
-                            yield data
-                except Exception as e:
-                    logger.error(f"Error reading file with smbclient: {e}")
-                    raise
+            def file_stream_with_retry():
+                max_retries = 3
+                base_delay = 0.1
+                
+                for attempt in range(max_retries + 1):
+                    try:
+                        # Check if file is accessible before opening
+                        if not self._is_file_accessible(unc_path):
+                            if attempt < max_retries:
+                                delay = base_delay * (2 ** attempt) + random.uniform(0, 0.1)
+                                logger.warning(f"File not accessible, retry {attempt + 1}/{max_retries} after {delay:.2f}s")
+                                time.sleep(delay)
+                                continue
+                            else:
+                                raise Exception("File is locked or not accessible after all retries")
+                        
+                        with smbclient.open_file(unc_path, mode='rb', buffering=0, 
+                                               timeout=30, share_access=['r', 'w', 'd']) as f:
+                            chunk_size = 64 * 1024  # 64KB chunks
+                            chunks_read = 0
+                            
+                            while True:
+                                try:
+                                    data = f.read(chunk_size)
+                                    if not data:
+                                        break
+                                    chunks_read += 1
+                                    yield data
+                                except Exception as read_error:
+                                    logger.error(f"Error reading chunk {chunks_read}: {read_error}")
+                                    if "being used by another process" in str(read_error):
+                                        raise  # Let outer retry handle this
+                                    raise
+                        
+                        logger.info(f"Successfully streamed file after {attempt + 1} attempt(s)")
+                        return
+                        
+                    except SMBOSError as e:
+                        if "0xc0000043" in str(e) or "being used by another process" in str(e):
+                            if attempt < max_retries:
+                                delay = base_delay * (2 ** attempt) + random.uniform(0, 0.1)
+                                logger.warning(f"File locked, retry {attempt + 1}/{max_retries} after {delay:.2f}s: {e}")
+                                time.sleep(delay)
+                                continue
+                            else:
+                                logger.error(f"File permanently locked after {max_retries} retries: {e}")
+                                # Try fallback method
+                                yield from self._fallback_file_copy(unc_path)
+                                return
+                        else:
+                            logger.error(f"SMB error (non-retry): {e}")
+                            raise
+                    except Exception as e:
+                        if attempt < max_retries and ("timeout" in str(e).lower() or "connection" in str(e).lower()):
+                            delay = base_delay * (2 ** attempt) + random.uniform(0, 0.1)
+                            logger.warning(f"Connection error, retry {attempt + 1}/{max_retries} after {delay:.2f}s: {e}")
+                            time.sleep(delay)
+                            continue
+                        else:
+                            logger.error(f"Error reading file with smbclient: {e}")
+                            raise
+                
+                raise Exception("Max retries exceeded")
             
             # Don't call stat here to avoid file locking issues
             # File size will be determined by API layer using separate stat call
             file_size = None
             
-            return file_stream(), file_size
+            return file_stream_with_retry(), file_size
             
         except ImportError:
             logger.error("smbclient high-level API not available, falling back to low-level API")
@@ -739,6 +795,115 @@ class SMBClient:
         except Exception as e:
             logger.error(f"smbclient download failed: {e}")
             raise
+    
+    def _is_file_accessible(self, unc_path: str) -> bool:
+        """
+        Check if a file is accessible without holding a lock
+        
+        Args:
+            unc_path: Full UNC path to the file
+            
+        Returns:
+            bool: True if file is accessible, False otherwise
+        """
+        try:
+            import smbclient
+            from smbprotocol.exceptions import SMBOSError
+            
+            # Quick stat check - if this fails, file is likely locked
+            stat_info = smbclient.stat(unc_path)
+            return stat_info.st_size > 0
+            
+        except SMBOSError as e:
+            if "0xc0000043" in str(e) or "being used by another process" in str(e):
+                logger.debug(f"File accessibility check failed - file is locked: {unc_path}")
+                return False
+            logger.debug(f"File accessibility check failed with SMB error: {e}")
+            return False
+        except Exception as e:
+            logger.debug(f"File accessibility check failed with error: {e}")
+            return False
+    
+    def _fallback_file_copy(self, unc_path: str):
+        """
+        Fallback method: copy file to temp location and stream from there
+        
+        Args:
+            unc_path: Full UNC path to the file
+            
+        Yields:
+            bytes: File chunks
+        """
+        import tempfile
+        import os
+        import shutil
+        
+        temp_file = None
+        try:
+            logger.info(f"Attempting fallback file copy for: {unc_path}")
+            
+            # Create temporary file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.apk')
+            temp_path = temp_file.name
+            temp_file.close()
+            
+            # Try to copy file using different methods
+            success = False
+            
+            # Method 1: Try smbclient with different share access
+            try:
+                import smbclient
+                smbclient.copyfile(unc_path, temp_path, timeout=60)
+                success = True
+                logger.info(f"Fallback copy successful using smbclient.copyfile")
+            except Exception as e:
+                logger.warning(f"Fallback method 1 failed: {e}")
+            
+            # Method 2: Try with system commands as last resort
+            if not success:
+                try:
+                    import subprocess
+                    # Use smbget on Linux systems
+                    if os.name != 'nt':
+                        # Extract server info for smbget
+                        server_parts = unc_path.split('\\')
+                        if len(server_parts) >= 4:
+                            server = server_parts[2]
+                            share = server_parts[3]
+                            file_path = '\\'.join(server_parts[4:])
+                            smb_url = f"smb://{server}/{share}/{file_path.replace('\\', '/')}"
+                            
+                            cmd = ['smbget', '-U', f'{self.username}%{self.password}', 
+                                  smb_url, '-o', temp_path]
+                            subprocess.run(cmd, check=True, timeout=60)
+                            success = True
+                            logger.info(f"Fallback copy successful using smbget")
+                except Exception as e:
+                    logger.warning(f"Fallback method 2 failed: {e}")
+            
+            if not success:
+                raise Exception("All fallback copy methods failed")
+            
+            # Stream from temporary file
+            with open(temp_path, 'rb') as f:
+                chunk_size = 64 * 1024
+                while True:
+                    data = f.read(chunk_size)
+                    if not data:
+                        break
+                    yield data
+                    
+        except Exception as e:
+            logger.error(f"Fallback file copy failed: {e}")
+            raise
+        finally:
+            # Clean up temporary file
+            if temp_file and os.path.exists(temp_file.name):
+                try:
+                    os.unlink(temp_file.name)
+                    logger.debug(f"Cleaned up temporary file: {temp_file.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temporary file: {e}")
     
     def download_file_range_stream(self, path: str, start: int, end: int):
         """
