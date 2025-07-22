@@ -7,6 +7,12 @@ test_*.py
 apk_finder/server/tmp/
 apk_finder/client/build/
 
+# Environment files with sensitive data
+*.env
+!*.env.example
+.env.local
+.env.*.local
+
 apk_finder/client/dist/
 apk_finder/client/dist/
 apk_finder/kivy_client/.buildozer/
