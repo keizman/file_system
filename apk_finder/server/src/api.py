@@ -194,45 +194,41 @@ async def download_file(request: Request, path: str, server: str, filename: Opti
             # Method 1: Try smbclient stat
             try:
                 import smbclient
-                if hasattr(client, 'host') and hasattr(client, 'share'):
-                    # Configure smbclient
-                    smbclient.ClientConfig(
-                        username=client.username,
-                        password=client.password
-                    )
-                    
-                    file_path = path[1:] if path.startswith('\\') else path
-                    unc_path = f"\\\\{client.host}\\{client.share}\\{file_path}"
-                    
-                    stat_info = smbclient.stat(unc_path)
-                    if hasattr(stat_info, 'st_size') and stat_info.st_size > 0:
-                        file_size = stat_info.st_size
-                        size_detection_method = "smbclient_stat"
-                        logger.info(f"Got file size via smbclient.stat: {file_size}")
+                # Use same path construction logic as SMB client
+                server_path = Config.FILE_SERVERS[server]["path"]
+                if server_path.endswith("\\"):
+                    server_path = server_path[:-1]
+                
+                if path.startswith("\\"):
+                    unc_path = f"{server_path}{path}"
+                else:
+                    unc_path = f"{server_path}\\{path}"
+                
+                # Configure smbclient
+                smbclient.ClientConfig(
+                    username=Config.FILE_SERVERS[server].get("username", ""),
+                    password=Config.FILE_SERVERS[server].get("password", "")
+                )
+                
+                stat_info = smbclient.stat(unc_path)
+                if hasattr(stat_info, 'st_size') and stat_info.st_size > 0:
+                    file_size = stat_info.st_size
+                    size_detection_method = "smbclient_stat"
+                    logger.info(f"Got file size via smbclient.stat: {file_size}")
                     
             except Exception as e:
                 logger.warning(f"smbclient.stat failed: {e}")
             
-            # Method 2: Try download stream methods
+            # Method 2: Final fallback to low-level API (only as last resort)
             if file_size <= 0:
                 try:
-                    _, detected_size = client.download_file_stream_smbclient(path)
+                    _, detected_size = client.download_file_stream(path)
                     if detected_size and detected_size > 0:
                         file_size = detected_size
-                        size_detection_method = "download_stream_smbclient"
-                        logger.info(f"Got file size via download stream: {file_size}")
+                        size_detection_method = "download_stream_lowlevel"
+                        logger.info(f"Got file size via low-level download stream: {file_size}")
                 except Exception as e:
-                    logger.warning(f"Could not get file size from smbclient download: {e}")
-                    
-                    # Final fallback to low-level API
-                    try:
-                        _, detected_size = client.download_file_stream(path)
-                        if detected_size and detected_size > 0:
-                            file_size = detected_size
-                            size_detection_method = "download_stream_lowlevel"
-                            logger.info(f"Got file size via low-level download stream: {file_size}")
-                    except Exception as e2:
-                        logger.warning(f"Could not get file size from low-level download: {e2}")
+                    logger.warning(f"Could not get file size from low-level download: {e}")
         
         # Validate final file size
         if file_size <= 0:
