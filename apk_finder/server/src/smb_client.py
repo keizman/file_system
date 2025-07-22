@@ -1,8 +1,6 @@
 import os
 import tempfile
 import uuid
-import asyncio
-import threading
 from datetime import datetime
 from typing import List, Dict, Tuple
 from smbprotocol.connection import Connection
@@ -13,18 +11,6 @@ from smbprotocol.query_info import FileInformationClass
 from loguru import logger
 from shared.models import APKFile
 from shared.utils import is_apk_file, extract_build_type
-
-# Global semaphore system for controlling concurrent file access
-_file_access_semaphores = {}
-_semaphore_lock = threading.Lock()
-
-def get_file_semaphore(file_path: str) -> threading.Semaphore:
-    """Get or create a semaphore for the given file path to prevent concurrent access issues"""
-    with _semaphore_lock:
-        if file_path not in _file_access_semaphores:
-            # Allow max 1 concurrent access per file to prevent SMB locking issues
-            _file_access_semaphores[file_path] = threading.Semaphore(1)
-        return _file_access_semaphores[file_path]
 
 def extract_smb_file_name(entry) -> str:
     """
@@ -737,20 +723,14 @@ class SMBClient:
                 file_size = None
             
             def file_stream():
-                # Use semaphore to prevent concurrent access to the same file
-                semaphore = get_file_semaphore(unc_path)
-                
                 try:
-                    with semaphore:
-                        logger.debug(f"Acquired semaphore for file: {unc_path}")
-                        with smbclient.open_file(unc_path, mode='rb', buffering=0) as f:
-                            chunk_size = 64 * 1024  # 64KB chunks
-                            while True:
-                                data = f.read(chunk_size)
-                                if not data:
-                                    break
-                                yield data
-                        logger.debug(f"Released semaphore for file: {unc_path}")
+                    with smbclient.open_file(unc_path, mode='rb', buffering=0) as f:
+                        chunk_size = 64 * 1024  # 64KB chunks
+                        while True:
+                            data = f.read(chunk_size)
+                            if not data:
+                                break
+                            yield data
                 except Exception as e:
                     logger.error(f"Error reading file with smbclient: {e}")
                     raise
@@ -794,28 +774,22 @@ class SMBClient:
             unc_path = f"\\\\{self.host}\\{self.share}\\{path}"
             
             def range_stream():
-                # Use semaphore to prevent concurrent access to the same file
-                semaphore = get_file_semaphore(unc_path)
-                
                 try:
-                    with semaphore:
-                        logger.debug(f"Acquired semaphore for range download: {unc_path}")
-                        with smbclient.open_file(unc_path, mode='rb', buffering=0) as f:
-                            # Seek to start position
-                            f.seek(start)
+                    with smbclient.open_file(unc_path, mode='rb', buffering=0) as f:
+                        # Seek to start position
+                        f.seek(start)
+                        
+                        remaining = end - start + 1
+                        chunk_size = min(64 * 1024, remaining)  # 64KB chunks or remaining bytes
+                        
+                        while remaining > 0:
+                            bytes_to_read = min(chunk_size, remaining)
+                            data = f.read(bytes_to_read)
+                            if not data:
+                                break
+                            yield data
+                            remaining -= len(data)
                             
-                            remaining = end - start + 1
-                            chunk_size = min(64 * 1024, remaining)  # 64KB chunks or remaining bytes
-                            
-                            while remaining > 0:
-                                bytes_to_read = min(chunk_size, remaining)
-                                data = f.read(bytes_to_read)
-                                if not data:
-                                    break
-                                yield data
-                                remaining -= len(data)
-                        logger.debug(f"Released semaphore for range download: {unc_path}")
-                                
                 except Exception as e:
                     logger.error(f"Error reading range with smbclient: {e}")
                     raise

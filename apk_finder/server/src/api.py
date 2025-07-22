@@ -499,15 +499,33 @@ async def check_download_capability(path: str, server: str, token: str = Depends
         # Get file info
         file_info = client.get_file_info(path)
         
-        # Test download capability
+        # Test download capability without actually opening the file stream
         download_methods = []
         try:
-            # Test smbclient
-            _, size = client.download_file_stream_smbclient(path)
+            # Test file accessibility using stat instead of opening stream
+            import smbclient
+            server_path = Config.FILE_SERVERS[server]["path"]
+            if server_path.endswith("\\"):
+                server_path = server_path[:-1]
+            if path.startswith("\\"):
+                unc_path = f"{server_path}{path}"
+            else:
+                unc_path = f"{server_path}\\{path}"
+            
+            # Configure credentials
+            smbclient.ClientConfig(
+                username=Config.FILE_SERVERS[server].get("username", ""),
+                password=Config.FILE_SERVERS[server].get("password", "")
+            )
+            
+            # Just check file stats, don't open the file
+            file_stat = smbclient.stat(unc_path)
+            size = file_stat.st_size
+            
             download_methods.append({
                 "method": "smbclient", 
                 "available": True, 
-                "can_get_size": size is not None,
+                "can_get_size": True,
                 "size": size
             })
         except Exception as e:
