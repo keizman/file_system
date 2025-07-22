@@ -871,7 +871,8 @@ class SMBClient:
                             server = server_parts[2]
                             share = server_parts[3]
                             file_path = '\\'.join(server_parts[4:])
-                            smb_url = f"smb://{server}/{share}/{file_path.replace('\\', '/')}"
+                            file_path_unix = file_path.replace('\\', '/')
+                            smb_url = f"smb://{server}/{share}/{file_path_unix}"
                             
                             cmd = ['smbget', '-U', f'{self.username}%{self.password}', 
                                   smb_url, '-o', temp_path]
