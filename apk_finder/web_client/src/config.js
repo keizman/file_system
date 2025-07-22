@@ -1,6 +1,8 @@
 // Web Client Configuration
 // Mirrors the PyQt5 client configuration structure
 
+import tokenEncryption from './utils/encryption.js'
+
 class WebClientConfig {
   constructor() {
     // Server Configuration - using Vite environment variables
@@ -28,7 +30,12 @@ class WebClientConfig {
         
         // Override with saved settings
         this.SERVER_URL = settings.server_url || this.SERVER_URL
-        this.API_TOKEN = settings.api_token || this.API_TOKEN
+        // Decrypt API token if it was stored encrypted
+        if (settings.api_token) {
+          this.API_TOKEN = tokenEncryption.isEncrypted(settings.api_token) 
+            ? tokenEncryption.decrypt(settings.api_token)
+            : settings.api_token
+        }
         this.MAX_SEARCH_RESULTS = settings.max_search_results || this.MAX_SEARCH_RESULTS
         this.DEFAULT_RESULTS_PER_PAGE = settings.default_results_per_page || this.DEFAULT_RESULTS_PER_PAGE
         this.THEME = settings.theme || this.THEME
@@ -44,7 +51,7 @@ class WebClientConfig {
     try {
       const settings = {
         server_url: this.SERVER_URL,
-        api_token: this.API_TOKEN,
+        api_token: tokenEncryption.encrypt(this.API_TOKEN),
         max_search_results: this.MAX_SEARCH_RESULTS,
         default_results_per_page: this.DEFAULT_RESULTS_PER_PAGE,
         theme: this.THEME,

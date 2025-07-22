@@ -110,6 +110,57 @@ npm run build
 # Deploy dist/ folder to any static hosting service
 ```
 
+### Use nginx: set your builded index.html path after root
+
+```
+    server {
+        listen 3001; # 监听 3001 端口
+        server_name localhost; # 服务器名称，可以替换为你的域名或 IP 地址
+
+        # 定义网站的根目录，Nginx 将在此目录中查找文件
+        root /opt/file_system/apk_finder/web_client/dist;
+
+        # 处理根路径 "/" 的请求
+        location / {
+            # 尝试查找 index.html 文件，如果找不到则返回 404
+            try_files $uri $uri/ /index.html;
+        }
+
+        # 处理静态文件请求 (例如 CSS, JS, 图片等在 assets 目录下的文件)
+        location /assets/ {
+            # 禁用目录列表，防止直接访问目录内容
+            autoindex off;
+            # 设置静态文件的缓存时间，这里设置为 30 天
+            expires 30d;
+            # 开启 gzip 压缩以减少传输大小
+            gzip on;
+            gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+            gzip_comp_level 6; # 压缩级别
+            gzip_vary on;
+        }
+        location /api/ {
+            proxy_pass http://localhost:9301/api/; # 将请求转发到上面定义的 upstream
+            proxy_set_header Host $host; # 转发原始 Host 头
+            proxy_set_header X-Real-IP $remote_addr; # 转发客户端真实 IP
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; # 转发 X-Forwarded-For 头
+            proxy_set_header X-Forwarded-Proto $scheme; # 转发原始协议 (http/https)
+
+            # 如果后端 API 期望处理 POST 请求体，这些是必要的
+            proxy_request_buffering off; # 关闭请求缓冲，对于流式上传等场景有用
+            # 如果有大文件上传，可能需要调整 client_max_body_size
+            client_max_body_size 10M; # 允许的最大请求体大小，根据需要调整
+        }
+
+
+        # 错误页面配置
+        error_page 500 502 503 504 /50x.html;
+        location = /50x.html {
+            root html; # 默认 Nginx 错误页面的位置
+        }
+    }
+```
+
+
 ### Docker
 
 ```dockerfile
