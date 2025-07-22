@@ -70,10 +70,10 @@ async def log_requests(request: Request, call_next):
     print(f"   Query params: {dict(request.query_params)}")
     print(f"   Client IP: {request.client.host}")
     
-    logger.warning(f"🔄 Request: {request.method} {request.url}")
-    logger.warning(f"   Headers: {dict(request.headers)}")
-    logger.warning(f"   Query params: {dict(request.query_params)}")
-    logger.warning(f"   Client IP: {request.client.host}")
+    logger.debug(f"🔄 Request: {request.method} {request.url}")
+    logger.debug(f"   Headers: {dict(request.headers)}")
+    logger.debug(f"   Query params: {dict(request.query_params)}")
+    logger.debug(f"   Client IP: {request.client.host}")
     
     # Process request
     response = await call_next(request)
@@ -81,7 +81,7 @@ async def log_requests(request: Request, call_next):
     # Log response details
     process_time = time.time() - start_time
     print(f"✅ Response: {response.status_code} - {process_time:.3f}s")
-    logger.warning(f"✅ Response: {response.status_code} - {process_time:.3f}s")
+    logger.debug(f"✅ Response: {response.status_code} - {process_time:.3f}s")
     
     return response
 

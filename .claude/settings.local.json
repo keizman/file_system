@@ -19,7 +19,8 @@
       "Bash(true)",
       "Bash(cd:*)",
       "Bash(conda remove:*)",
-      "Bash(apt-get:*)"
+      "Bash(apt-get:*)",
+      "Bash(grep:*)"
     ],
     "deny": []
   }
