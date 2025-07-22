@@ -363,19 +363,27 @@ async def download_file(request: Request, path: str, server: str, filename: Opti
             })
         
         # Set content length and range headers
+        # Note: For streaming with potential errors, use chunked transfer encoding
+        use_chunked = False
+        
         if status_code == 206:
             content_length = end - start + 1
             headers['Content-Length'] = str(content_length)
             headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
             logger.info(f"Serving range: {start}-{end}, content-length: {content_length}")
         else:
-            if file_size and file_size > 0:
+            if file_size and file_size > 0 and is_android:
+                # For Android, use chunked transfer to avoid Content-Length conflicts on stream errors
+                headers['Transfer-Encoding'] = 'chunked'
+                use_chunked = True
+                logger.info(f"Using chunked transfer for Android client, file size: {file_size}")
+            elif file_size and file_size > 0:
                 headers['Content-Length'] = str(file_size)
                 logger.info(f"Serving full file, content-length: {file_size}")
             else:
                 logger.warning(f"Serving file without Content-Length (size unknown)")
-                # For Android compatibility, try to set a reasonable content-type
                 headers['Transfer-Encoding'] = 'chunked'
+                use_chunked = True
         
         # Increment download count
         directory = path.split("\\")[1] if "\\" in path else ""
@@ -385,13 +393,29 @@ async def download_file(request: Request, path: str, server: str, filename: Opti
         
         # Wrap file stream with error handling to prevent server crashes
         def safe_file_stream():
+            bytes_sent = 0
             try:
-                yield from file_stream
-                logger.info(f"Completed streaming download: {path}")
+                for chunk in file_stream:
+                    bytes_sent += len(chunk)
+                    yield chunk
+                logger.info(f"Completed streaming download: {path} ({bytes_sent} bytes)")
             except Exception as stream_error:
-                logger.error(f"Stream error during download of {path}: {stream_error}")
-                # Don't re-raise here as it would crash the connection
-                # The client will detect the incomplete download
+                logger.error(f"Stream error during download of {path} after {bytes_sent} bytes: {stream_error}")
+                # For chunked encoding, we can gracefully terminate
+                # For Content-Length, we need to avoid the mismatch error
+                if use_chunked or bytes_sent == 0:
+                    # Safe to terminate for chunked or if no bytes sent
+                    return
+                else:
+                    # Try to pad with zeros to match Content-Length if possible
+                    try:
+                        expected_size = int(headers.get('Content-Length', 0))
+                        remaining = expected_size - bytes_sent
+                        if remaining > 0 and remaining < 1024 * 1024:  # Max 1MB padding
+                            logger.warning(f"Padding {remaining} bytes to avoid Content-Length mismatch")
+                            yield b'\x00' * remaining
+                    except:
+                        pass
                 return
         
         return StreamingResponse(

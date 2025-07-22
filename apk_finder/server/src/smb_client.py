@@ -736,7 +736,7 @@ class SMBClient:
                                 raise Exception("File is locked or not accessible after all retries")
                         
                         with smbclient.open_file(unc_path, mode='rb', buffering=0, 
-                                               timeout=30, share_access=['r', 'w', 'd']) as f:
+                                               share_access=['r', 'w', 'd']) as f:
                             chunk_size = 64 * 1024  # 64KB chunks
                             chunks_read = 0
                             
