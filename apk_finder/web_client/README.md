@@ -2,6 +2,8 @@
 
 A modern web client for the APK Finder application, built with Vue 3, Vite, and Tailwind CSS.
 
+# bug: Mi phone default browser will download failed, because it's has own strategy: go to built-in app to download it, but the app has install successful, theres's now shown and will not requeste again. NEXT: dump net pkg to find what he do...
+
 ## Features
 
 - 🔍 **Search APK files** with multi-keyword support
